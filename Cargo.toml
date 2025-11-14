@@ -1,0 +1,13 @@
+[package]
+name = "pain-lsp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tower-lsp.workspace = true
+pain-compiler = { path = "../pain-compiler" }
+thiserror.workspace = true
+anyhow.workspace = true
+
