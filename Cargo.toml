@@ -10,4 +10,5 @@ tower-lsp.workspace = true
 pain-compiler = { path = "../pain-compiler" }
 thiserror.workspace = true
 anyhow.workspace = true
+tokio.workspace = true
 
