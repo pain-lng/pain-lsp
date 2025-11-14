@@ -65,6 +65,7 @@ impl tower_lsp::LanguageServer for Backend {
         
         // TODO: Parse document and provide context-aware completions
         let items = vec![
+            // Keywords
             CompletionItem {
                 label: "fn".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
@@ -86,22 +87,50 @@ impl tower_lsp::LanguageServer for Backend {
             CompletionItem {
                 label: "if".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Conditional statement".to_string()),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "else".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Else branch".to_string()),
                 ..Default::default()
             },
             CompletionItem {
                 label: "for".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("For loop".to_string()),
                 ..Default::default()
             },
             CompletionItem {
                 label: "while".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("While loop".to_string()),
                 ..Default::default()
             },
             CompletionItem {
+                label: "break".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Break out of loop".to_string()),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "continue".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Continue to next loop iteration".to_string()),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "return".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Return from function".to_string()),
+                ..Default::default()
+            },
+            // Built-in functions
+            CompletionItem {
                 label: "print".to_string(),
                 kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some("Built-in print function".to_string()),
+                detail: Some("Built-in print function: print(value: dynamic) -> void".to_string()),
                 ..Default::default()
             },
         ];
@@ -207,7 +236,7 @@ impl Backend {
 // Find function at given line and column position
 fn find_function_at_position(program: &Program, line: usize, _column: usize) -> Option<HoverInfo> {
     for item in &program.items {
-        let Item::Function(func) = item;
+        let Item::Function(func) = item else { continue };
         // Simple heuristic: check if position is on function name line
         // In a real implementation, we'd use proper span information
         let func_line = func.span.start.line;
