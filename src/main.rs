@@ -2,8 +2,8 @@
 
 use tower_lsp::{LspService, Server};
 use tower_lsp::lsp_types::*;
-use pain_compiler::{parse, type_check_program, ast::*};
-use std::collections::HashMap;
+use pain_compiler::{parse, type_check_program, ast::*, stdlib::get_stdlib_functions};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -60,12 +60,169 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>, tower_lsp::jsonrpc::Error> {
-        let _uri = params.text_document_position.text_document.uri;
-        let _position = params.text_document_position.position;
+        let uri = params.text_document_position.text_document.uri.clone();
+        let position = params.text_document_position.position;
         
-        // TODO: Parse document and provide context-aware completions
-        let items = vec![
-            // Keywords
+        // Get document text
+        let text = self.documents.read().await.get(&uri).cloned();
+        if let Some(text) = text {
+            // Parse document to extract context
+            if let Ok(program) = parse(&text) {
+                let items = self.get_completions(&program, &text, position);
+                return Ok(Some(CompletionResponse::Array(items)));
+            }
+        }
+        
+        // Fallback to basic completions if parsing fails
+        Ok(Some(CompletionResponse::Array(self.get_basic_completions())))
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>, tower_lsp::jsonrpc::Error> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        
+        // Get document text from cache
+        let text = self.documents.read().await.get(&uri).cloned();
+        if let Some(text) = text {
+            if let Ok(program) = parse(&text) {
+                // Find function at position (LSP uses 0-based line numbers)
+                if let Some(hover_info) = find_function_at_position(&program, position.line as usize + 1, position.character as usize + 1) {
+                    let mut contents = Vec::new();
+                    
+                    // Add function signature
+                    contents.push(MarkedString::String(hover_info.signature));
+                    
+                    // Add doc comment if present
+                    if let Some(doc) = hover_info.doc {
+                        contents.push(MarkedString::String(format!("---\n{}", doc)));
+                    }
+                    
+                    return Ok(Some(Hover {
+                        contents: HoverContents::Array(contents),
+                        range: None,
+                    }));
+                }
+            }
+        }
+        
+        Ok(None)
+    }
+
+    async fn shutdown(&self) -> Result<(), tower_lsp::jsonrpc::Error> {
+        Ok(())
+    }
+}
+
+impl Backend {
+    /// Get context-aware completions
+    fn get_completions(&self, program: &Program, text: &str, position: Position) -> Vec<CompletionItem> {
+        let mut items = Vec::new();
+        let line = position.line as usize;
+        let column = position.character as usize;
+        
+        // Get text before cursor on current line
+        let lines: Vec<&str> = text.lines().collect();
+        let current_line = if line < lines.len() {
+            lines[line]
+        } else {
+            return self.get_basic_completions();
+        };
+        
+        let text_before_cursor = if column <= current_line.len() {
+            &current_line[..column]
+        } else {
+            current_line
+        };
+        
+        // Check if we're after a dot (member access)
+        let is_member_access = text_before_cursor.trim_end().ends_with('.');
+        
+        // Extract functions from program
+        let mut function_names = HashSet::new();
+        for item in &program.items {
+            match item {
+                Item::Function(func) => {
+                    function_names.insert(func.name.clone());
+                    items.push(CompletionItem {
+                        label: func.name.clone(),
+                        kind: Some(CompletionItemKind::FUNCTION),
+                        detail: Some(format_function_signature(func)),
+                        documentation: func.doc.clone().map(|d| Documentation::String(d)),
+                        ..Default::default()
+                    });
+                }
+                Item::Class(class) => {
+                    // Add class name
+                    items.push(CompletionItem {
+                        label: class.name.clone(),
+                        kind: Some(CompletionItemKind::CLASS),
+                        detail: Some(format!("class {}", class.name)),
+                        documentation: class.doc.clone().map(|d| Documentation::String(d)),
+                        ..Default::default()
+                    });
+                    
+                    // Add class methods
+                    for method in &class.methods {
+                        function_names.insert(method.name.clone());
+                        items.push(CompletionItem {
+                            label: format!("{}.{}", class.name, method.name),
+                            kind: Some(CompletionItemKind::METHOD),
+                            detail: Some(format_function_signature(method)),
+                            documentation: method.doc.clone().map(|d| Documentation::String(d)),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Extract variables from current scope (simplified - just from current function)
+        if let Some(vars) = extract_variables_in_scope(program, line + 1, column + 1) {
+            for var_name in vars {
+                if !function_names.contains(&var_name) {
+                    items.push(CompletionItem {
+                        label: var_name.clone(),
+                        kind: Some(CompletionItemKind::VARIABLE),
+                        detail: Some("Variable".to_string()),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        
+        // Add stdlib functions
+        for stdlib_func in get_stdlib_functions() {
+            // Avoid duplicates
+            if !function_names.contains(&stdlib_func.name) {
+                let params_str: Vec<String> = stdlib_func.params.iter()
+                    .map(|(name, ty)| format!("{}: {}", name, format_type(ty)))
+                    .collect();
+                let signature = format!("{}({}) -> {}", 
+                    stdlib_func.name,
+                    params_str.join(", "),
+                    format_type(&stdlib_func.return_type));
+                
+                items.push(CompletionItem {
+                    label: stdlib_func.name.clone(),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some(signature.clone()),
+                    documentation: Some(Documentation::String(stdlib_func.description)),
+                    ..Default::default()
+                });
+            }
+        }
+        
+        // Add keywords (only if not in member access context)
+        if !is_member_access {
+            items.extend(self.get_keyword_completions());
+        }
+        
+        items
+    }
+    
+    /// Get basic keyword completions
+    fn get_keyword_completions(&self) -> Vec<CompletionItem> {
+        vec![
             CompletionItem {
                 label: "fn".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
@@ -126,55 +283,24 @@ impl tower_lsp::LanguageServer for Backend {
                 detail: Some("Return from function".to_string()),
                 ..Default::default()
             },
-            // Built-in functions
-            CompletionItem {
-                label: "print".to_string(),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some("Built-in print function: print(value: dynamic) -> void".to_string()),
-                ..Default::default()
-            },
-        ];
-        
-        Ok(Some(CompletionResponse::Array(items)))
+        ]
     }
-
-    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>, tower_lsp::jsonrpc::Error> {
-        let uri = params.text_document_position_params.text_document.uri;
-        let position = params.text_document_position_params.position;
+    
+    /// Get basic completions (fallback)
+    fn get_basic_completions(&self) -> Vec<CompletionItem> {
+        let mut items = self.get_keyword_completions();
         
-        // Get document text from cache
-        let text = self.documents.read().await.get(&uri).cloned();
-        if let Some(text) = text {
-            if let Ok(program) = parse(&text) {
-                // Find function at position (LSP uses 0-based line numbers)
-                if let Some(hover_info) = find_function_at_position(&program, position.line as usize + 1, position.character as usize + 1) {
-                    let mut contents = Vec::new();
-                    
-                    // Add function signature
-                    contents.push(MarkedString::String(hover_info.signature));
-                    
-                    // Add doc comment if present
-                    if let Some(doc) = hover_info.doc {
-                        contents.push(MarkedString::String(format!("---\n{}", doc)));
-                    }
-                    
-                    return Ok(Some(Hover {
-                        contents: HoverContents::Array(contents),
-                        range: None,
-                    }));
-                }
-            }
-        }
+        // Add basic stdlib functions
+        items.push(CompletionItem {
+            label: "print".to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some("print(value: dynamic) -> void".to_string()),
+            ..Default::default()
+        });
         
-        Ok(None)
+        items
     }
-
-    async fn shutdown(&self) -> Result<(), tower_lsp::jsonrpc::Error> {
-        Ok(())
-    }
-}
-
-impl Backend {
+    
     async fn on_change(&self, uri: Url, text: String) {
         let diagnostics = self.check_document(&text);
         self.client
@@ -300,6 +426,59 @@ fn format_type(ty: &Type) -> String {
         Type::Map(k, v) => format!("map[{}, {}]", format_type(k), format_type(v)),
         Type::Tensor(inner, dims) => format!("Tensor[{}, {:?}]", format_type(inner), dims),
         Type::Named(name) => name.clone(),
+    }
+}
+
+// Extract variables visible at given position (simplified implementation)
+fn extract_variables_in_scope(program: &Program, line: usize, _column: usize) -> Option<HashSet<String>> {
+    let mut variables = HashSet::new();
+    
+    // Find function containing this line
+    for item in &program.items {
+        if let Item::Function(func) = item {
+            let func_start = func.span.start.line;
+            let func_end = func.span.end.line;
+            
+            // Check if position is within this function
+            if line >= func_start && line <= func_end {
+                // Add function parameters
+                for param in &func.params {
+                    variables.insert(param.name.clone());
+                }
+                
+                // Extract variables from function body (simplified - just from let/var statements)
+                extract_variables_from_statements(&func.body, &mut variables);
+                
+                return Some(variables);
+            }
+        }
+    }
+    
+    None
+}
+
+// Extract variable names from statements
+fn extract_variables_from_statements(statements: &[Statement], variables: &mut HashSet<String>) {
+    for stmt in statements {
+        match stmt {
+            Statement::Let { name, .. } => {
+                variables.insert(name.clone());
+            }
+            Statement::For { var, body, .. } => {
+                variables.insert(var.clone());
+                extract_variables_from_statements(body, variables);
+            }
+            Statement::If { then, else_, .. } => {
+                extract_variables_from_statements(then, variables);
+                if let Some(else_stmts) = else_ {
+                    extract_variables_from_statements(else_stmts, variables);
+                }
+            }
+            Statement::While { body, .. } => {
+                extract_variables_from_statements(body, variables);
+            }
+            _ => {}
+        }
     }
 }
 
