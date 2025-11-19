@@ -1,11 +1,11 @@
 // Pain LSP server
 
-use tower_lsp::{LspService, Server};
-use tower_lsp::lsp_types::*;
-use pain_compiler::{parse, type_check_program, ast::*, stdlib::get_stdlib_functions};
+use pain_compiler::{ast::*, parse, stdlib::get_stdlib_functions, type_check_program};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tower_lsp::lsp_types::*;
+use tower_lsp::{LspService, Server};
 
 #[derive(Debug, Clone)]
 struct HoverInfo {
@@ -21,7 +21,10 @@ struct Backend {
 
 #[tower_lsp::async_trait]
 impl tower_lsp::LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult, tower_lsp::jsonrpc::Error> {
+    async fn initialize(
+        &self,
+        _: InitializeParams,
+    ) -> Result<InitializeResult, tower_lsp::jsonrpc::Error> {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -40,29 +43,43 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        self.client.log_message(MessageType::INFO, "Pain LSP server initialized").await;
+        self.client
+            .log_message(MessageType::INFO, "Pain LSP server initialized")
+            .await;
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         let text = params.text_document.text.clone();
-        self.documents.write().await.insert(uri.clone(), text.clone());
+        self.documents
+            .write()
+            .await
+            .insert(uri.clone(), text.clone());
         self.on_change(uri, text).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        let text = params.content_changes.into_iter().next()
+        let text = params
+            .content_changes
+            .into_iter()
+            .next()
             .map(|change| change.text)
             .unwrap_or_default();
-        self.documents.write().await.insert(uri.clone(), text.clone());
+        self.documents
+            .write()
+            .await
+            .insert(uri.clone(), text.clone());
         self.on_change(uri, text).await;
     }
 
-    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>, tower_lsp::jsonrpc::Error> {
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> Result<Option<CompletionResponse>, tower_lsp::jsonrpc::Error> {
         let uri = params.text_document_position.text_document.uri.clone();
         let position = params.text_document_position.position;
-        
+
         // Get document text
         let text = self.documents.read().await.get(&uri).cloned();
         if let Some(text) = text {
@@ -72,31 +89,37 @@ impl tower_lsp::LanguageServer for Backend {
                 return Ok(Some(CompletionResponse::Array(items)));
             }
         }
-        
+
         // Fallback to basic completions if parsing fails
-        Ok(Some(CompletionResponse::Array(self.get_basic_completions())))
+        Ok(Some(CompletionResponse::Array(
+            self.get_basic_completions(),
+        )))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>, tower_lsp::jsonrpc::Error> {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
-        
+
         // Get document text from cache
         let text = self.documents.read().await.get(&uri).cloned();
         if let Some(text) = text {
             if let Ok(program) = parse(&text) {
                 // Find function at position (LSP uses 0-based line numbers)
-                if let Some(hover_info) = find_function_at_position(&program, position.line as usize + 1, position.character as usize + 1) {
+                if let Some(hover_info) = find_function_at_position(
+                    &program,
+                    position.line as usize + 1,
+                    position.character as usize + 1,
+                ) {
                     let mut contents = Vec::new();
-                    
+
                     // Add function signature
                     contents.push(MarkedString::String(hover_info.signature));
-                    
+
                     // Add doc comment if present
                     if let Some(doc) = hover_info.doc {
                         contents.push(MarkedString::String(format!("---\n{}", doc)));
                     }
-                    
+
                     return Ok(Some(Hover {
                         contents: HoverContents::Array(contents),
                         range: None,
@@ -104,7 +127,7 @@ impl tower_lsp::LanguageServer for Backend {
                 }
             }
         }
-        
+
         Ok(None)
     }
 
@@ -115,11 +138,16 @@ impl tower_lsp::LanguageServer for Backend {
 
 impl Backend {
     /// Get context-aware completions
-    fn get_completions(&self, program: &Program, text: &str, position: Position) -> Vec<CompletionItem> {
+    fn get_completions(
+        &self,
+        program: &Program,
+        text: &str,
+        position: Position,
+    ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
         let line = position.line as usize;
         let column = position.character as usize;
-        
+
         // Get text before cursor on current line
         let lines: Vec<&str> = text.lines().collect();
         let current_line = if line < lines.len() {
@@ -127,16 +155,16 @@ impl Backend {
         } else {
             return self.get_basic_completions();
         };
-        
+
         let text_before_cursor = if column <= current_line.len() {
             &current_line[..column]
         } else {
             current_line
         };
-        
+
         // Check if we're after a dot (member access)
         let is_member_access = text_before_cursor.trim_end().ends_with('.');
-        
+
         // Extract functions from program
         let mut function_names = HashSet::new();
         for item in &program.items {
@@ -160,7 +188,7 @@ impl Backend {
                         documentation: class.doc.clone().map(|d| Documentation::String(d)),
                         ..Default::default()
                     });
-                    
+
                     // Add class methods
                     for method in &class.methods {
                         function_names.insert(method.name.clone());
@@ -175,7 +203,7 @@ impl Backend {
                 }
             }
         }
-        
+
         // Extract variables from current scope (simplified - just from current function)
         if let Some(vars) = extract_variables_in_scope(program, line + 1, column + 1) {
             for var_name in vars {
@@ -189,19 +217,23 @@ impl Backend {
                 }
             }
         }
-        
+
         // Add stdlib functions
         for stdlib_func in get_stdlib_functions() {
             // Avoid duplicates
             if !function_names.contains(&stdlib_func.name) {
-                let params_str: Vec<String> = stdlib_func.params.iter()
+                let params_str: Vec<String> = stdlib_func
+                    .params
+                    .iter()
                     .map(|(name, ty)| format!("{}: {}", name, format_type(ty)))
                     .collect();
-                let signature = format!("{}({}) -> {}", 
+                let signature = format!(
+                    "{}({}) -> {}",
                     stdlib_func.name,
                     params_str.join(", "),
-                    format_type(&stdlib_func.return_type));
-                
+                    format_type(&stdlib_func.return_type)
+                );
+
                 items.push(CompletionItem {
                     label: stdlib_func.name.clone(),
                     kind: Some(CompletionItemKind::FUNCTION),
@@ -211,15 +243,15 @@ impl Backend {
                 });
             }
         }
-        
+
         // Add keywords (only if not in member access context)
         if !is_member_access {
             items.extend(self.get_keyword_completions());
         }
-        
+
         items
     }
-    
+
     /// Get basic keyword completions
     fn get_keyword_completions(&self) -> Vec<CompletionItem> {
         vec![
@@ -285,11 +317,11 @@ impl Backend {
             },
         ]
     }
-    
+
     /// Get basic completions (fallback)
     fn get_basic_completions(&self) -> Vec<CompletionItem> {
         let mut items = self.get_keyword_completions();
-        
+
         // Add basic stdlib functions
         items.push(CompletionItem {
             label: "print".to_string(),
@@ -297,10 +329,10 @@ impl Backend {
             detail: Some("print(value: dynamic) -> void".to_string()),
             ..Default::default()
         });
-        
+
         items
     }
-    
+
     async fn on_change(&self, uri: Url, text: String) {
         let diagnostics = self.check_document(&text);
         self.client
@@ -322,8 +354,14 @@ impl Backend {
                     Err(err) => {
                         diagnostics.push(Diagnostic {
                             range: Range {
-                                start: Position { line: 0, character: 0 },
-                                end: Position { line: 0, character: 0 },
+                                start: Position {
+                                    line: 0,
+                                    character: 0,
+                                },
+                                end: Position {
+                                    line: 0,
+                                    character: 0,
+                                },
                             },
                             severity: Some(DiagnosticSeverity::ERROR),
                             code: None,
@@ -340,8 +378,14 @@ impl Backend {
             Err(err) => {
                 diagnostics.push(Diagnostic {
                     range: Range {
-                        start: Position { line: 0, character: 0 },
-                        end: Position { line: 0, character: 0 },
+                        start: Position {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: Position {
+                            line: 0,
+                            character: 0,
+                        },
                     },
                     severity: Some(DiagnosticSeverity::ERROR),
                     code: None,
@@ -366,7 +410,7 @@ fn find_function_at_position(program: &Program, line: usize, _column: usize) -> 
         // Simple heuristic: check if position is on function name line
         // In a real implementation, we'd use proper span information
         let func_line = func.span.start.line;
-        
+
         // Check if we're on the function definition line
         if line == func_line || line == func_line + 1 {
             let signature = format_function_signature(func);
@@ -382,33 +426,41 @@ fn find_function_at_position(program: &Program, line: usize, _column: usize) -> 
 // Format function signature for hover display
 fn format_function_signature(func: &Function) -> String {
     let mut sig = String::new();
-    
+
     // Attributes
     if !func.attrs.is_empty() {
         for attr in &func.attrs {
-            sig.push_str(&format!("@{}{} ", attr.name, 
-                if attr.args.is_empty() { String::new() } 
-                else { format!("({})", attr.args.len()) }));
+            sig.push_str(&format!(
+                "@{}{} ",
+                attr.name,
+                if attr.args.is_empty() {
+                    String::new()
+                } else {
+                    format!("({})", attr.args.len())
+                }
+            ));
         }
     }
-    
+
     // Function name and parameters
     sig.push_str("fn ");
     sig.push_str(&func.name);
     sig.push('(');
-    
-    let params: Vec<String> = func.params.iter()
+
+    let params: Vec<String> = func
+        .params
+        .iter()
         .map(|p| format!("{}: {}", p.name, format_type(&p.ty)))
         .collect();
     sig.push_str(&params.join(", "));
     sig.push(')');
-    
+
     // Return type
     if let Some(ref ret_ty) = func.return_type {
         sig.push_str(" -> ");
         sig.push_str(&format_type(ret_ty));
     }
-    
+
     sig
 }
 
@@ -430,30 +482,34 @@ fn format_type(ty: &Type) -> String {
 }
 
 // Extract variables visible at given position (simplified implementation)
-fn extract_variables_in_scope(program: &Program, line: usize, _column: usize) -> Option<HashSet<String>> {
+fn extract_variables_in_scope(
+    program: &Program,
+    line: usize,
+    _column: usize,
+) -> Option<HashSet<String>> {
     let mut variables = HashSet::new();
-    
+
     // Find function containing this line
     for item in &program.items {
         if let Item::Function(func) = item {
             let func_start = func.span.start.line;
             let func_end = func.span.end.line;
-            
+
             // Check if position is within this function
             if line >= func_start && line <= func_end {
                 // Add function parameters
                 for param in &func.params {
                     variables.insert(param.name.clone());
                 }
-                
+
                 // Extract variables from function body (simplified - just from let/var statements)
                 extract_variables_from_statements(&func.body, &mut variables);
-                
+
                 return Some(variables);
             }
         }
     }
-    
+
     None
 }
 
@@ -487,7 +543,7 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) = LspService::new(|client| Backend { 
+    let (service, socket) = LspService::new(|client| Backend {
         client,
         documents: Arc::new(RwLock::new(HashMap::new())),
     });
