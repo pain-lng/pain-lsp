@@ -175,7 +175,7 @@ impl Backend {
                         label: func.name.clone(),
                         kind: Some(CompletionItemKind::FUNCTION),
                         detail: Some(format_function_signature(func)),
-                        documentation: func.doc.clone().map(|d| Documentation::String(d)),
+                        documentation: func.doc.clone().map(Documentation::String),
                         ..Default::default()
                     });
                 }
@@ -185,7 +185,7 @@ impl Backend {
                         label: class.name.clone(),
                         kind: Some(CompletionItemKind::CLASS),
                         detail: Some(format!("class {}", class.name)),
-                        documentation: class.doc.clone().map(|d| Documentation::String(d)),
+                        documentation: class.doc.clone().map(Documentation::String),
                         ..Default::default()
                     });
 
@@ -196,7 +196,7 @@ impl Backend {
                             label: format!("{}.{}", class.name, method.name),
                             kind: Some(CompletionItemKind::METHOD),
                             detail: Some(format_function_signature(method)),
-                            documentation: method.doc.clone().map(|d| Documentation::String(d)),
+                            documentation: method.doc.clone().map(Documentation::String),
                             ..Default::default()
                         });
                     }
