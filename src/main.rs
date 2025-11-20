@@ -1,6 +1,10 @@
 // Pain LSP server
 
-use pain_compiler::{ast::*, parse, stdlib::get_stdlib_functions, type_check_program};
+use pain_compiler::{
+    ast::*, error::ErrorFormatter, parse, parse_with_recovery, stdlib::get_stdlib_functions,
+    type_check_program_with_context, type_checker::TypeContext,
+    warnings::WarningCollector,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -343,63 +347,142 @@ impl Backend {
     fn check_document(&self, text: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
 
-        // Parse
-        match parse(text) {
-            Ok(program) => {
-                // Type check
-                match type_check_program(&program) {
-                    Ok(_) => {
-                        // No errors
+        // Parse with error recovery for better IDE experience
+        let (parse_result, parse_errors) = parse_with_recovery(text);
+
+        // Add parse errors as diagnostics
+        for parse_err in &parse_errors {
+            diagnostics.push(self.parse_error_to_diagnostic(parse_err));
+        }
+
+        // If parsing succeeded (even partially), try type checking
+        if let Ok(program) = parse_result {
+            // Build type context for better error messages
+            let mut ctx = TypeContext::new();
+            for item in &program.items {
+                match item {
+                    Item::Function(func) => {
+                        ctx.add_function(func.name.clone(), func.clone());
                     }
-                    Err(err) => {
-                        diagnostics.push(Diagnostic {
-                            range: Range {
-                                start: Position {
-                                    line: 0,
-                                    character: 0,
-                                },
-                                end: Position {
-                                    line: 0,
-                                    character: 0,
-                                },
-                            },
-                            severity: Some(DiagnosticSeverity::ERROR),
-                            code: None,
-                            code_description: None,
-                            source: Some("pain".to_string()),
-                            message: format!("Type error: {:?}", err),
-                            related_information: None,
-                            tags: None,
-                            data: None,
-                        });
+                    Item::Class(class) => {
+                        ctx.add_class(class.name.clone(), class.clone());
                     }
                 }
             }
-            Err(err) => {
-                diagnostics.push(Diagnostic {
-                    range: Range {
-                        start: Position {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: Position {
-                            line: 0,
-                            character: 0,
-                        },
-                    },
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: None,
-                    code_description: None,
-                    source: Some("pain".to_string()),
-                    message: format!("Parse error: {}", err),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
+
+            // Type check
+            match type_check_program_with_context(&program, &mut ctx) {
+                Ok(_) => {
+                    // Collect warnings
+                    let warnings = WarningCollector::collect_warnings(&program, &ctx);
+                    for warning in warnings {
+                        diagnostics.push(self.warning_to_diagnostic(&warning, text));
+                    }
+                }
+                Err(err) => {
+                    let formatter = ErrorFormatter::new(text).with_context(&ctx);
+                    let error_msg = formatter.format_error(&err);
+                    diagnostics.push(self.type_error_to_diagnostic(&err, &error_msg));
+                }
             }
         }
 
         diagnostics
+    }
+
+    fn parse_error_to_diagnostic(&self, err: &pain_compiler::error::ParseError) -> Diagnostic {
+        Diagnostic {
+            range: Range {
+                start: Position {
+                    line: (err.span.line().saturating_sub(1)) as u32,
+                    character: (err.span.column().saturating_sub(1)) as u32,
+                },
+                end: Position {
+                    line: (err.span.line().saturating_sub(1)) as u32,
+                    character: (err.span.column().saturating_sub(1) + 1) as u32,
+                },
+            },
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("pain".to_string()),
+            message: err.message.clone(),
+            related_information: None,
+            tags: None,
+            data: None,
+        }
+    }
+
+    fn type_error_to_diagnostic(
+        &self,
+        err: &pain_compiler::TypeError,
+        formatted_msg: &str,
+    ) -> Diagnostic {
+        let span = match err {
+            pain_compiler::TypeError::UndefinedVariable { span, .. } => *span,
+            pain_compiler::TypeError::TypeMismatch { span, .. } => *span,
+            pain_compiler::TypeError::CannotInferType { span, .. } => *span,
+            pain_compiler::TypeError::InvalidOperation { span, .. } => *span,
+        };
+
+        Diagnostic {
+            range: Range {
+                start: Position {
+                    line: (span.line().saturating_sub(1)) as u32,
+                    character: (span.column().saturating_sub(1)) as u32,
+                },
+                end: Position {
+                    line: (span.line().saturating_sub(1)) as u32,
+                    character: (span.column().saturating_sub(1) + 1) as u32,
+                },
+            },
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("pain".to_string()),
+            message: formatted_msg.lines().next().unwrap_or(formatted_msg).to_string(),
+            related_information: None,
+            tags: None,
+            data: None,
+        }
+    }
+
+    fn warning_to_diagnostic(&self, warning: &pain_compiler::Warning, _text: &str) -> Diagnostic {
+        let (message, span) = match warning {
+            pain_compiler::Warning::UnusedVariable { name, span } => {
+                (format!("unused variable `{}`", name), *span)
+            }
+            pain_compiler::Warning::UnusedFunction { name, span } => {
+                (format!("unused function `{}`", name), *span)
+            }
+            pain_compiler::Warning::DeadCode { span, reason } => {
+                (format!("dead code: {}", reason), *span)
+            }
+            pain_compiler::Warning::UnreachableCode { span } => {
+                ("unreachable code".to_string(), *span)
+            }
+        };
+
+        Diagnostic {
+            range: Range {
+                start: Position {
+                    line: (span.line().saturating_sub(1)) as u32,
+                    character: (span.column().saturating_sub(1)) as u32,
+                },
+                end: Position {
+                    line: (span.line().saturating_sub(1)) as u32,
+                    character: (span.column().saturating_sub(1) + 1) as u32,
+                },
+            },
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: None,
+            code_description: None,
+            source: Some("pain".to_string()),
+            message,
+            related_information: None,
+            tags: None,
+            data: None,
+        }
     }
 }
 
