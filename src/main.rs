@@ -2,8 +2,7 @@
 
 use pain_compiler::{
     ast::*, error::ErrorFormatter, parse, parse_with_recovery, stdlib::get_stdlib_functions,
-    type_check_program_with_context, type_checker::TypeContext,
-    warnings::WarningCollector,
+    type_check_program_with_context, type_checker::TypeContext, warnings::WarningCollector,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -440,7 +439,11 @@ impl Backend {
             code: None,
             code_description: None,
             source: Some("pain".to_string()),
-            message: formatted_msg.lines().next().unwrap_or(formatted_msg).to_string(),
+            message: formatted_msg
+                .lines()
+                .next()
+                .unwrap_or(formatted_msg)
+                .to_string(),
             related_information: None,
             tags: None,
             data: None,
