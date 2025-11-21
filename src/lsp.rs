@@ -508,33 +508,43 @@ impl Backend {
     }
 
     async fn on_change(&self, uri: url::Url, text: String) {
+        eprintln!("LSP: on_change START uri={}, text_len={}", uri, text.len());
+        
         // Wrap check_document in catch_unwind to prevent panics from crashing LSP
         // Note: We compute diagnostics synchronously here, but the lock is already released
         // so this won't block other operations. For very large files, this could still be slow,
         // but it's better than blocking the document cache.
+        eprintln!("LSP: on_change calling check_document");
         let diagnostics = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.check_document(&text)
-        })).unwrap_or_else(|_| {
+        })).unwrap_or_else(|e| {
             // If check_document panics, return empty diagnostics
             // Log the panic for debugging
-            eprintln!("LSP: check_document panicked, returning empty diagnostics");
+            eprintln!("LSP: check_document PANICKED!");
+            eprintln!("LSP: panic info: {:?}", e);
             eprintln!("LSP: text length: {}, uri: {}", text.len(), uri);
             vec![]
         });
+        eprintln!("LSP: on_change check_document returned {} diagnostics", diagnostics.len());
         
         // Publish diagnostics - wrap in catch_unwind to prevent panics
+        eprintln!("LSP: on_change preparing to publish diagnostics");
         let publish_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (self.client.clone(), uri.clone(), diagnostics)
         }));
         
         if let Ok((client, uri_clone, diags)) = publish_result {
+            eprintln!("LSP: on_change spawning publish task");
             // Use spawn to avoid blocking
             tokio::spawn(async move {
+                eprintln!("LSP: publish task START");
                 client.publish_diagnostics(uri_clone, diags, None).await;
+                eprintln!("LSP: publish task END");
             });
         } else {
             eprintln!("LSP: on_change panicked before publishing diagnostics");
         }
+        eprintln!("LSP: on_change END");
     }
 
     pub fn check_document(&self, text: &str) -> Vec<Diagnostic> {
@@ -555,7 +565,14 @@ impl Backend {
     }
 
     fn check_document_internal(&self, text: &str) -> Vec<Diagnostic> {
-        eprintln!("LSP: check_document_internal START");
+        eprintln!("LSP: check_document_internal START text_len={}", text.len());
+        
+        // Handle empty files gracefully
+        if text.trim().is_empty() {
+            eprintln!("LSP: check_document_internal file is empty, returning no diagnostics");
+            return Vec::new();
+        }
+        
         let mut diagnostics = Vec::new();
 
         // Parse with error recovery for better IDE experience
