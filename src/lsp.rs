@@ -97,13 +97,16 @@ impl tower_lsp::LanguageServer for Backend {
             docs.insert(uri.clone(), text.clone());
         } // Lock released here
         
-        // Clear cache for this document (simplified - no panic protection needed)
+        // Clear cache for this document
         {
             let mut cache = self.parsed_cache.write().await;
             cache.remove(&uri);
         }
         
-        // Call on_change after releasing lock to avoid blocking other operations
+        // Call on_change after releasing lock - use spawn to avoid blocking
+        // We need to create a temporary Backend-like structure to call check_document
+        // But since we can't clone Backend, we'll just call on_change directly
+        // The on_change method already has panic protection
         self.on_change(uri, text).await;
     }
 
