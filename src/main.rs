@@ -5,12 +5,13 @@ use tower_lsp::{LspService, Server};
 use std::fs::OpenOptions;
 use std::io::Write;
 
-// Helper function to log to file
+// Helper function to log to file (in temp directory for visibility)
 fn log_to_file(msg: &str) {
+    let log_path = std::env::temp_dir().join("pain_lsp_debug.log");
     if let Ok(mut file) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("pain_lsp_debug.log")
+        .open(&log_path)
     {
         let _ = writeln!(file, "[{}] {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"), msg);
     }
@@ -18,7 +19,12 @@ fn log_to_file(msg: &str) {
 
 #[tokio::main]
 async fn main() {
+    let log_path = std::env::temp_dir().join("pain_lsp_debug.log");
+    eprintln!("=== Pain LSP starting, log file: {:?} ===", log_path);
+    
     log_to_file("=== LSP MAIN START ===");
+    log_to_file(&format!("Log file location: {:?}", log_path));
+    log_to_file(&format!("Current working directory: {:?}", std::env::current_dir()));
     
     // Set panic hook to log panics before they crash the server
     std::panic::set_hook(Box::new(|panic_info| {
