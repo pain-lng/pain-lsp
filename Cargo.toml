@@ -5,6 +5,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[lib]
+name = "pain_lsp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pain-lsp"
 path = "src/main.rs"
@@ -19,4 +23,10 @@ pain-compiler = { path = "../pain-compiler" }
 thiserror.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
+url = "2.5"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tower-lsp = { workspace = true }
+url = "2.5"
 
