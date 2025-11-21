@@ -2,37 +2,59 @@
 
 use pain_lsp::Backend;
 use tower_lsp::{LspService, Server};
+use std::fs::OpenOptions;
+use std::io::Write;
+
+// Helper function to log to file
+fn log_to_file(msg: &str) {
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("pain_lsp_debug.log")
+    {
+        let _ = writeln!(file, "[{}] {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"), msg);
+    }
+}
 
 #[tokio::main]
 async fn main() {
+    log_to_file("=== LSP MAIN START ===");
+    
     // Set panic hook to log panics before they crash the server
     std::panic::set_hook(Box::new(|panic_info| {
-        eprintln!("LSP PANIC: {:?}", panic_info);
-        eprintln!("LSP PANIC location: {:?}", panic_info.location());
+        let msg = format!("LSP PANIC: {:?}", panic_info);
+        eprintln!("{}", msg);
+        log_to_file(&msg);
+        
+        let loc_msg = format!("LSP PANIC location: {:?}", panic_info.location());
+        eprintln!("{}", loc_msg);
+        log_to_file(&loc_msg);
+        
         if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
-            eprintln!("LSP PANIC message: {}", s);
+            let panic_msg = format!("LSP PANIC message: {}", s);
+            eprintln!("{}", panic_msg);
+            log_to_file(&panic_msg);
         } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
-            eprintln!("LSP PANIC message: {}", s);
+            let panic_msg = format!("LSP PANIC message: {}", s);
+            eprintln!("{}", panic_msg);
+            log_to_file(&panic_msg);
         }
     }));
+    log_to_file("Panic hook set");
 
+    log_to_file("Creating stdin/stdout");
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
+    log_to_file("stdin/stdout created");
 
-    let (service, socket) = LspService::new(|client| Backend::new(client));
+    log_to_file("Creating LspService");
+    let (service, socket) = LspService::new(|client| {
+        log_to_file("Backend::new called");
+        Backend::new(client)
+    });
+    log_to_file("LspService created");
     
-    // Wrap serve in catch_unwind to prevent crashes
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Server::new(stdin, stdout, socket).serve(service)
-    }));
-    
-    match result {
-        Ok(serve_future) => {
-            serve_future.await;
-        }
-        Err(_) => {
-            eprintln!("LSP: Server initialization panicked");
-            std::process::exit(1);
-        }
-    }
+    log_to_file("Starting server");
+    Server::new(stdin, stdout, socket).serve(service).await;
+    log_to_file("Server stopped");
 }
