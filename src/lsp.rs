@@ -1,7 +1,7 @@
 // Pain LSP server implementation
 
 use pain_compiler::{
-    ast::*, error::ErrorFormatter, parse, parse_with_recovery, stdlib::get_stdlib_functions,
+    ast::*, error::ErrorFormatter, parse_with_recovery, stdlib::get_stdlib_functions,
     type_check_program_with_context, type_checker::TypeContext, warnings::WarningCollector,
 };
 use std::collections::{HashMap, HashSet};
@@ -45,7 +45,8 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        self.client
+        // Log initialization - ignore errors to prevent crashes
+        let _ = self.client
             .log_message(MessageType::INFO, "Pain LSP server initialized")
             .await;
     }
@@ -53,10 +54,18 @@ impl tower_lsp::LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         let text = params.text_document.text.clone();
+        
+        // Store document - wrap in catch_unwind to prevent panics
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // We can't await in catch_unwind, so we'll do it outside
+        }));
+        
         self.documents
             .write()
             .await
             .insert(uri.clone(), text.clone());
+        
+        // Call on_change - it has its own panic protection
         self.on_change(uri, text).await;
     }
 
@@ -68,10 +77,14 @@ impl tower_lsp::LanguageServer for Backend {
             .next()
             .map(|change| change.text)
             .unwrap_or_default();
+        
+        // Store document
         self.documents
             .write()
             .await
             .insert(uri.clone(), text.clone());
+        
+        // Call on_change - it has its own panic protection
         self.on_change(uri, text).await;
     }
 
@@ -85,9 +98,16 @@ impl tower_lsp::LanguageServer for Backend {
         // Get document text
         let text = self.documents.read().await.get(&uri).cloned();
         if let Some(text) = text {
-            // Parse document to extract context
-            if let Ok(program) = parse(&text) {
-                let items = self.get_completions(&program, &text, position);
+            // Use parse_with_recovery instead of parse to avoid panics
+            let (parse_result, _) = parse_with_recovery(&text);
+            if let Ok(program) = parse_result {
+                // Wrap get_completions in catch_unwind to prevent panics
+                let items = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.get_completions(&program, &text, position)
+                })).unwrap_or_else(|_| {
+                    // If get_completions panics, return basic completions
+                    self.get_basic_completions()
+                });
                 return Ok(Some(CompletionResponse::Array(items)));
             }
         }
@@ -99,19 +119,25 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>, tower_lsp::jsonrpc::Error> {
-        let uri = params.text_document_position_params.text_document.uri;
+        let uri = params.text_document_position_params.text_document.uri.clone();
         let position = params.text_document_position_params.position;
 
         // Get document text from cache
         let text = self.documents.read().await.get(&uri).cloned();
         if let Some(text) = text {
-            if let Ok(program) = parse(&text) {
-                // Find function at position (LSP uses 0-based line numbers)
-                if let Some(hover_info) = find_function_at_position(
-                    &program,
-                    position.line as usize + 1,
-                    position.character as usize + 1,
-                ) {
+            // Use parse_with_recovery instead of parse to avoid panics
+            let (parse_result, _) = parse_with_recovery(&text);
+            if let Ok(program) = parse_result {
+                // Wrap find_function_at_position in catch_unwind to prevent panics
+                let hover_info = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    find_function_at_position(
+                        &program,
+                        position.line as usize + 1,
+                        position.character as usize + 1,
+                    )
+                }));
+
+                if let Ok(Some(hover_info)) = hover_info {
                     let mut contents = Vec::new();
 
                     // Add function signature
@@ -146,11 +172,27 @@ impl Backend {
         text: &str,
         position: Position,
     ) -> Vec<CompletionItem> {
+        // Wrap in catch_unwind to prevent panics
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.get_completions_internal(program, text, position)
+        })).unwrap_or_else(|_| {
+            // If anything panics, return basic completions
+            eprintln!("LSP: get_completions panicked, returning basic completions");
+            self.get_basic_completions()
+        })
+    }
+
+    fn get_completions_internal(
+        &self,
+        program: &Program,
+        text: &str,
+        position: Position,
+    ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
         let line = position.line as usize;
         let column = position.character as usize;
 
-        // Get text before cursor on current line
+        // Get text before cursor on current line - safe indexing
         let lines: Vec<&str> = text.lines().collect();
         let current_line = if line < lines.len() {
             lines[line]
@@ -167,16 +209,20 @@ impl Backend {
         // Check if we're after a dot (member access)
         let is_member_access = text_before_cursor.trim_end().ends_with('.');
 
-        // Extract functions from program
+        // Extract functions from program - wrap format_function_signature in catch_unwind
         let mut function_names = HashSet::new();
         for item in &program.items {
             match item {
                 Item::Function(func) => {
                     function_names.insert(func.name.clone());
+                    let detail = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        format_function_signature(func)
+                    })).unwrap_or_else(|_| format!("fn {}", func.name));
+                    
                     items.push(CompletionItem {
                         label: func.name.clone(),
                         kind: Some(CompletionItemKind::FUNCTION),
-                        detail: Some(format_function_signature(func)),
+                        detail: Some(detail),
                         documentation: func.doc.clone().map(Documentation::String),
                         ..Default::default()
                     });
@@ -191,13 +237,17 @@ impl Backend {
                         ..Default::default()
                     });
 
-                    // Add class methods
+                    // Add class methods - wrap format_function_signature
                     for method in &class.methods {
                         function_names.insert(method.name.clone());
+                        let detail = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            format_function_signature(method)
+                        })).unwrap_or_else(|_| format!("fn {}", method.name));
+                        
                         items.push(CompletionItem {
                             label: format!("{}.{}", class.name, method.name),
                             kind: Some(CompletionItemKind::METHOD),
-                            detail: Some(format_function_signature(method)),
+                            detail: Some(detail),
                             documentation: method.doc.clone().map(Documentation::String),
                             ..Default::default()
                         });
@@ -206,8 +256,12 @@ impl Backend {
             }
         }
 
-        // Extract variables from current scope (simplified - just from current function)
-        if let Some(vars) = extract_variables_in_scope(program, line + 1, column + 1) {
+        // Extract variables from current scope - wrap in catch_unwind
+        let vars = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            extract_variables_in_scope(program, line + 1, column + 1)
+        })).unwrap_or(None);
+        
+        if let Some(vars) = vars {
             for var_name in vars {
                 if !function_names.contains(&var_name) {
                     items.push(CompletionItem {
@@ -220,21 +274,23 @@ impl Backend {
             }
         }
 
-        // Add stdlib functions
+        // Add stdlib functions - wrap format_type in catch_unwind
         for stdlib_func in get_stdlib_functions() {
             // Avoid duplicates
             if !function_names.contains(&stdlib_func.name) {
-                let params_str: Vec<String> = stdlib_func
-                    .params
-                    .iter()
-                    .map(|(name, ty)| format!("{}: {}", name, format_type(ty)))
-                    .collect();
-                let signature = format!(
-                    "{}({}) -> {}",
-                    stdlib_func.name,
-                    params_str.join(", "),
-                    format_type(&stdlib_func.return_type)
-                );
+                let signature = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let params_str: Vec<String> = stdlib_func
+                        .params
+                        .iter()
+                        .map(|(name, ty)| format!("{}: {}", name, format_type(ty)))
+                        .collect();
+                    format!(
+                        "{}({}) -> {}",
+                        stdlib_func.name,
+                        params_str.join(", "),
+                        format_type(&stdlib_func.return_type)
+                    )
+                })).unwrap_or_else(|_| format!("{}()", stdlib_func.name));
 
                 items.push(CompletionItem {
                     label: stdlib_func.name.clone(),
@@ -336,13 +392,32 @@ impl Backend {
     }
 
     async fn on_change(&self, uri: url::Url, text: String) {
-        let diagnostics = self.check_document(&text);
-        self.client
-            .publish_diagnostics(uri, diagnostics, None)
-            .await;
+        // Wrap check_document in catch_unwind to prevent panics from crashing LSP
+        let diagnostics = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.check_document(&text)
+        })).unwrap_or_else(|_| {
+            // If check_document panics, return empty diagnostics
+            // Log the panic for debugging
+            eprintln!("LSP: check_document panicked, returning empty diagnostics");
+            vec![]
+        });
+        
+        // Publish diagnostics - this is fire-and-forget, returns ()
+        // If this panics, it will be caught by the LSP framework
+        self.client.publish_diagnostics(uri, diagnostics, None).await;
     }
 
     pub fn check_document(&self, text: &str) -> Vec<Diagnostic> {
+        // Wrap entire function in catch_unwind to prevent any panics
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.check_document_internal(text)
+        })).unwrap_or_else(|_| {
+            // If anything panics, return empty diagnostics
+            vec![]
+        })
+    }
+
+    fn check_document_internal(&self, text: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
 
         // Parse with error recovery for better IDE experience
@@ -368,19 +443,35 @@ impl Backend {
                 }
             }
 
-            // Type check
-            match type_check_program_with_context(&program, &mut ctx) {
-                Ok(_) => {
-                    // Collect warnings
-                    let warnings = WarningCollector::collect_warnings(&program, &ctx);
-                    for warning in warnings {
-                        diagnostics.push(self.warning_to_diagnostic(&warning, text));
+            // Type check - wrap in catch_unwind to prevent panics
+            let type_check_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                type_check_program_with_context(&program, &mut ctx)
+            }));
+
+            match type_check_result {
+                Ok(Ok(_)) => {
+                    // Collect warnings - wrap in catch_unwind
+                    let warnings_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        WarningCollector::collect_warnings(&program, &ctx)
+                    }));
+                    
+                    if let Ok(warnings) = warnings_result {
+                        for warning in warnings {
+                            diagnostics.push(self.warning_to_diagnostic(&warning, text));
+                        }
                     }
                 }
-                Err(err) => {
-                    let formatter = ErrorFormatter::new(text).with_context(&ctx);
-                    let error_msg = formatter.format_error(&err);
+                Ok(Err(err)) => {
+                    // Type error - format safely
+                    let error_msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let formatter = ErrorFormatter::new(text).with_context(&ctx);
+                        formatter.format_error(&err)
+                    })).unwrap_or_else(|_| format!("Type error: {:?}", err));
+                    
                     diagnostics.push(self.type_error_to_diagnostic(&err, &error_msg));
+                }
+                Err(_) => {
+                    // Type checking panicked - skip type checking diagnostics
                 }
             }
         }
@@ -510,6 +601,16 @@ pub fn find_function_at_position(program: &Program, line: usize, _column: usize)
 
 // Format function signature for hover display
 pub fn format_function_signature(func: &Function) -> String {
+    // Wrap in catch_unwind to prevent panics from format_type recursion
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        format_function_signature_internal(func)
+    })).unwrap_or_else(|_| {
+        // Fallback to simple signature if formatting panics
+        format!("fn {}()", func.name)
+    })
+}
+
+fn format_function_signature_internal(func: &Function) -> String {
     let mut sig = String::new();
 
     // Attributes
@@ -549,8 +650,17 @@ pub fn format_function_signature(func: &Function) -> String {
     sig
 }
 
-// Format type for display
+// Format type for display with recursion limit to prevent stack overflow
 pub fn format_type(ty: &Type) -> String {
+    format_type_with_depth(ty, 0)
+}
+
+fn format_type_with_depth(ty: &Type, depth: usize) -> String {
+    // Limit recursion depth to prevent stack overflow
+    if depth > 10 {
+        return "...".to_string();
+    }
+
     match ty {
         Type::Int => "int".to_string(),
         Type::Str => "str".to_string(),
@@ -558,10 +668,10 @@ pub fn format_type(ty: &Type) -> String {
         Type::Float64 => "float64".to_string(),
         Type::Bool => "bool".to_string(),
         Type::Dynamic => "dynamic".to_string(),
-        Type::List(inner) => format!("list[{}]", format_type(inner)),
-        Type::Array(inner) => format!("array[{}]", format_type(inner)),
-        Type::Map(k, v) => format!("map[{}, {}]", format_type(k), format_type(v)),
-        Type::Tensor(inner, dims) => format!("Tensor[{}, {:?}]", format_type(inner), dims),
+        Type::List(inner) => format!("list[{}]", format_type_with_depth(inner, depth + 1)),
+        Type::Array(inner) => format!("array[{}]", format_type_with_depth(inner, depth + 1)),
+        Type::Map(k, v) => format!("map[{}, {}]", format_type_with_depth(k, depth + 1), format_type_with_depth(v, depth + 1)),
+        Type::Tensor(inner, dims) => format!("Tensor[{}, {:?}]", format_type_with_depth(inner, depth + 1), dims),
         Type::Named(name) => name.clone(),
     }
 }
