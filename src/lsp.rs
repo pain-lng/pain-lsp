@@ -7,6 +7,8 @@ use pain_compiler::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+// Note: timeout and Duration imports removed - simplified implementation
+// Timeout protection is handled at the VS Code extension level
 use tower_lsp::lsp_types::*;
 
 #[derive(Debug, Clone)]
@@ -19,6 +21,18 @@ pub struct HoverInfo {
 pub struct Backend {
     pub client: tower_lsp::Client,
     pub documents: Arc<RwLock<HashMap<url::Url, String>>>,
+    // Track pending operations to allow cancellation
+    pub max_document_size: usize, // Maximum document size in bytes (default: 10MB)
+}
+
+impl Backend {
+    pub fn new(client: tower_lsp::Client) -> Self {
+        Self {
+            client,
+            documents: Arc::new(RwLock::new(HashMap::new())),
+            max_document_size: 10 * 1024 * 1024, // 10MB default
+        }
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -55,17 +69,24 @@ impl tower_lsp::LanguageServer for Backend {
         let uri = params.text_document.uri.clone();
         let text = params.text_document.text.clone();
         
-        // Store document - wrap in catch_unwind to prevent panics
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // We can't await in catch_unwind, so we'll do it outside
-        }));
+        // Check document size to prevent memory issues
+        if text.len() > self.max_document_size {
+            let _ = self.client
+                .log_message(
+                    MessageType::WARNING,
+                    format!("Document {} is too large ({} bytes), skipping", uri, text.len()),
+                )
+                .await;
+            return;
+        }
         
-        self.documents
-            .write()
-            .await
-            .insert(uri.clone(), text.clone());
+        // Store document - release lock quickly
+        {
+            let mut docs = self.documents.write().await;
+            docs.insert(uri.clone(), text.clone());
+        } // Lock released here
         
-        // Call on_change - it has its own panic protection
+        // Call on_change after releasing lock to avoid blocking other operations
         self.on_change(uri, text).await;
     }
 
@@ -78,13 +99,24 @@ impl tower_lsp::LanguageServer for Backend {
             .map(|change| change.text)
             .unwrap_or_default();
         
-        // Store document
-        self.documents
-            .write()
-            .await
-            .insert(uri.clone(), text.clone());
+        // Check document size
+        if text.len() > self.max_document_size {
+            let _ = self.client
+                .log_message(
+                    MessageType::WARNING,
+                    format!("Document {} is too large ({} bytes), skipping", uri, text.len()),
+                )
+                .await;
+            return;
+        }
         
-        // Call on_change - it has its own panic protection
+        // Store document - release lock quickly
+        {
+            let mut docs = self.documents.write().await;
+            docs.insert(uri.clone(), text.clone());
+        } // Lock released here
+        
+        // Call on_change after releasing lock
         self.on_change(uri, text).await;
     }
 
@@ -95,19 +127,25 @@ impl tower_lsp::LanguageServer for Backend {
         let uri = params.text_document_position.text_document.uri.clone();
         let position = params.text_document_position.position;
 
-        // Get document text
-        let text = self.documents.read().await.get(&uri).cloned();
+        // Get document text - clone quickly and release lock
+        let text = {
+            let docs = self.documents.read().await;
+            docs.get(&uri).cloned()
+        }; // Lock released here
+        
         if let Some(text) = text {
             // Use parse_with_recovery instead of parse to avoid panics
             let (parse_result, _) = parse_with_recovery(&text);
             if let Ok(program) = parse_result {
                 // Wrap get_completions in catch_unwind to prevent panics
+                // Note: Timeout protection is handled at the VS Code extension level
                 let items = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     self.get_completions(&program, &text, position)
                 })).unwrap_or_else(|_| {
                     // If get_completions panics, return basic completions
                     self.get_basic_completions()
                 });
+                
                 return Ok(Some(CompletionResponse::Array(items)));
             }
         }
@@ -122,8 +160,12 @@ impl tower_lsp::LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri.clone();
         let position = params.text_document_position_params.position;
 
-        // Get document text from cache
-        let text = self.documents.read().await.get(&uri).cloned();
+        // Get document text from cache - clone quickly and release lock
+        let text = {
+            let docs = self.documents.read().await;
+            docs.get(&uri).cloned()
+        }; // Lock released here
+        
         if let Some(text) = text {
             // Use parse_with_recovery instead of parse to avoid panics
             let (parse_result, _) = parse_with_recovery(&text);
@@ -160,6 +202,9 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<(), tower_lsp::jsonrpc::Error> {
+        // Clear documents on shutdown to free memory
+        let mut docs = self.documents.write().await;
+        docs.clear();
         Ok(())
     }
 }
@@ -393,6 +438,9 @@ impl Backend {
 
     async fn on_change(&self, uri: url::Url, text: String) {
         // Wrap check_document in catch_unwind to prevent panics from crashing LSP
+        // Note: We compute diagnostics synchronously here, but the lock is already released
+        // so this won't block other operations. For very large files, this could still be slow,
+        // but it's better than blocking the document cache.
         let diagnostics = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.check_document(&text)
         })).unwrap_or_else(|_| {
@@ -732,4 +780,3 @@ pub fn extract_variables_from_statements(statements: &[Statement], variables: &m
         }
     }
 }
-
