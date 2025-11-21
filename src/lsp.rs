@@ -52,7 +52,8 @@ impl tower_lsp::LanguageServer for Backend {
         &self,
         _: InitializeParams,
     ) -> Result<InitializeResult, tower_lsp::jsonrpc::Error> {
-        Ok(InitializeResult {
+        eprintln!("LSP: initialize START");
+        let result = InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
@@ -66,14 +67,18 @@ impl tower_lsp::LanguageServer for Backend {
                 ..Default::default()
             },
             ..Default::default()
-        })
+        };
+        eprintln!("LSP: initialize END");
+        Ok(result)
     }
 
     async fn initialized(&self, _: InitializedParams) {
+        eprintln!("LSP: initialized START");
         // Log initialization - ignore errors to prevent crashes
         let _ = self.client
             .log_message(MessageType::INFO, "Pain LSP server initialized")
             .await;
+        eprintln!("LSP: initialized END - server is ready");
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
