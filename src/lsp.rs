@@ -5,6 +5,8 @@ use pain_compiler::{
     type_check_program_with_context, type_checker::TypeContext, warnings::WarningCollector,
 };
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 // Note: timeout and Duration imports removed - simplified implementation
@@ -23,6 +25,9 @@ pub struct Backend {
     pub documents: Arc<RwLock<HashMap<url::Url, String>>>,
     // Track pending operations to allow cancellation
     pub max_document_size: usize, // Maximum document size in bytes (default: 10MB)
+    // Cache for parsed programs to avoid re-parsing on every completion/hover
+    // Note: This is a simple cache - in production, consider using LRU cache
+    pub parsed_cache: Arc<RwLock<HashMap<url::Url, (String, Program)>>>, // (text_hash, program)
 }
 
 impl Backend {
@@ -31,6 +36,39 @@ impl Backend {
             client,
             documents: Arc::new(RwLock::new(HashMap::new())),
             max_document_size: 10 * 1024 * 1024, // 10MB default
+            parsed_cache: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+    
+    // Get or parse program with caching
+    async fn get_or_parse_program(&self, uri: &url::Url, text: &str) -> Option<Program> {
+        // Simple hash-based cache check
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        let text_hash = hasher.finish().to_string();
+        
+        // Check cache
+        {
+            let cache = self.parsed_cache.read().await;
+            if let Some((cached_hash, cached_program)) = cache.get(uri) {
+                if cached_hash == &text_hash {
+                    return Some(cached_program.clone());
+                }
+            }
+        }
+        
+        // Parse and cache
+        let (parse_result, _) = parse_with_recovery(text);
+        if let Ok(program) = parse_result {
+            let mut cache = self.parsed_cache.write().await;
+            // Limit cache size to prevent memory issues
+            if cache.len() > 50 {
+                cache.clear(); // Simple eviction - clear all
+            }
+            cache.insert(uri.clone(), (text_hash, program.clone()));
+            Some(program)
+        } else {
+            None
         }
     }
 }
@@ -86,6 +124,12 @@ impl tower_lsp::LanguageServer for Backend {
             docs.insert(uri.clone(), text.clone());
         } // Lock released here
         
+        // Invalidate cache for this document
+        {
+            let mut cache = self.parsed_cache.write().await;
+            cache.remove(&uri);
+        }
+        
         // Call on_change after releasing lock to avoid blocking other operations
         self.on_change(uri, text).await;
     }
@@ -116,6 +160,12 @@ impl tower_lsp::LanguageServer for Backend {
             docs.insert(uri.clone(), text.clone());
         } // Lock released here
         
+        // Invalidate cache for this document
+        {
+            let mut cache = self.parsed_cache.write().await;
+            cache.remove(&uri);
+        }
+        
         // Call on_change after releasing lock
         self.on_change(uri, text).await;
     }
@@ -134,9 +184,9 @@ impl tower_lsp::LanguageServer for Backend {
         }; // Lock released here
         
         if let Some(text) = text {
-            // Use parse_with_recovery instead of parse to avoid panics
-            let (parse_result, _) = parse_with_recovery(&text);
-            if let Ok(program) = parse_result {
+            // Use cached parsing for better performance
+            let program = self.get_or_parse_program(&uri, &text).await;
+            if let Some(program) = program {
                 // Wrap get_completions in catch_unwind to prevent panics
                 // Note: Timeout protection is handled at the VS Code extension level
                 let items = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -202,9 +252,15 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<(), tower_lsp::jsonrpc::Error> {
-        // Clear documents on shutdown to free memory
-        let mut docs = self.documents.write().await;
-        docs.clear();
+        // Clear documents and cache on shutdown to free memory
+        {
+            let mut docs = self.documents.write().await;
+            docs.clear();
+        }
+        {
+            let mut cache = self.parsed_cache.write().await;
+            cache.clear();
+        }
         Ok(())
     }
 }
@@ -254,15 +310,25 @@ impl Backend {
         // Check if we're after a dot (member access)
         let is_member_access = text_before_cursor.trim_end().ends_with('.');
 
-        // Extract functions from program - wrap format_function_signature in catch_unwind
+        // Extract functions from program - optimize by limiting detail formatting
+        // Format full signatures only for first N items to improve performance
         let mut function_names = HashSet::new();
+        let max_detailed_items = 50; // Limit detailed formatting for performance
+        let mut detailed_count = 0;
+        
         for item in &program.items {
             match item {
                 Item::Function(func) => {
                     function_names.insert(func.name.clone());
-                    let detail = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        format_function_signature(func)
-                    })).unwrap_or_else(|_| format!("fn {}", func.name));
+                    // Only format full signature for first N items
+                    let detail = if detailed_count < max_detailed_items {
+                        detailed_count += 1;
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            format_function_signature(func)
+                        })).unwrap_or_else(|_| format!("fn {}", func.name))
+                    } else {
+                        format!("fn {}", func.name)
+                    };
                     
                     items.push(CompletionItem {
                         label: func.name.clone(),
@@ -282,12 +348,17 @@ impl Backend {
                         ..Default::default()
                     });
 
-                    // Add class methods - wrap format_function_signature
+                    // Add class methods - optimize formatting
                     for method in &class.methods {
                         function_names.insert(method.name.clone());
-                        let detail = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            format_function_signature(method)
-                        })).unwrap_or_else(|_| format!("fn {}", method.name));
+                        let detail = if detailed_count < max_detailed_items {
+                            detailed_count += 1;
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                format_function_signature(method)
+                            })).unwrap_or_else(|_| format!("fn {}", method.name))
+                        } else {
+                            format!("fn {}", method.name)
+                        };
                         
                         items.push(CompletionItem {
                             label: format!("{}.{}", class.name, method.name),
@@ -319,29 +390,40 @@ impl Backend {
             }
         }
 
-        // Add stdlib functions - wrap format_type in catch_unwind
-        for stdlib_func in get_stdlib_functions() {
+        // Add stdlib functions - optimize by caching formatted signatures
+        // Only format signatures if we're actually going to use them
+        // This avoids expensive formatting for functions that won't be shown
+        let stdlib_funcs = get_stdlib_functions();
+        let max_stdlib_items = 100; // Limit stdlib completions to prevent UI lag
+        
+        for stdlib_func in stdlib_funcs.iter().take(max_stdlib_items) {
             // Avoid duplicates
             if !function_names.contains(&stdlib_func.name) {
-                let signature = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let params_str: Vec<String> = stdlib_func
-                        .params
-                        .iter()
-                        .map(|(name, ty)| format!("{}: {}", name, format_type(ty)))
-                        .collect();
-                    format!(
-                        "{}({}) -> {}",
-                        stdlib_func.name,
-                        params_str.join(", "),
-                        format_type(&stdlib_func.return_type)
-                    )
-                })).unwrap_or_else(|_| format!("{}()", stdlib_func.name));
+                // Only format signature if we have space (performance optimization)
+                let signature = if items.len() < 200 {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let params_str: Vec<String> = stdlib_func
+                            .params
+                            .iter()
+                            .map(|(name, ty)| format!("{}: {}", name, format_type(ty)))
+                            .collect();
+                        format!(
+                            "{}({}) -> {}",
+                            stdlib_func.name,
+                            params_str.join(", "),
+                            format_type(&stdlib_func.return_type)
+                        )
+                    })).unwrap_or_else(|_| format!("{}()", stdlib_func.name))
+                } else {
+                    // For large lists, use simple format to save time
+                    format!("{}()", stdlib_func.name)
+                };
 
                 items.push(CompletionItem {
                     label: stdlib_func.name.clone(),
                     kind: Some(CompletionItemKind::FUNCTION),
-                    detail: Some(signature.clone()),
-                    documentation: Some(Documentation::String(stdlib_func.description)),
+                    detail: Some(signature),
+                    documentation: Some(Documentation::String(stdlib_func.description.clone())),
                     ..Default::default()
                 });
             }
