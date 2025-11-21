@@ -239,6 +239,7 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<(), tower_lsp::jsonrpc::Error> {
+        eprintln!("LSP: shutdown START");
         // Clear documents and cache on shutdown to free memory
         {
             let mut docs = self.documents.write().await;
@@ -248,6 +249,7 @@ impl tower_lsp::LanguageServer for Backend {
             let mut cache = self.parsed_cache.write().await;
             cache.clear();
         }
+        eprintln!("LSP: shutdown END");
         Ok(())
     }
 }
