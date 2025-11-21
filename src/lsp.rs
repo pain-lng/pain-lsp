@@ -83,7 +83,20 @@ impl tower_lsp::LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         eprintln!("LSP: did_open START");
-        let uri = params.text_document.uri.clone();
+        
+        // Wrap entire handler in catch_unwind to prevent any panics from crashing LSP
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            params.text_document.uri.clone()
+        }));
+        
+        let uri = match result {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("LSP: did_open PANICKED extracting URI: {:?}", e);
+                return;
+            }
+        };
+        
         let text = params.text_document.text.clone();
         eprintln!("LSP: did_open uri={}, text_len={}", uri, text.len());
         
@@ -99,21 +112,37 @@ impl tower_lsp::LanguageServer for Backend {
             return;
         }
         
-        // Store document - release lock quickly
+        // Store document - release lock quickly - wrap in catch_unwind
         eprintln!("LSP: did_open storing document");
-        {
-            let mut docs = self.documents.write().await;
-            docs.insert(uri.clone(), text.clone());
-        } // Lock released here
+        let store_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let docs_arc = self.documents.clone();
+            let uri_clone = uri.clone();
+            let text_clone = text.clone();
+            (docs_arc, uri_clone, text_clone)
+        }));
+        
+        if let Ok((docs_arc, uri_clone, text_clone)) = store_result {
+            let mut docs = docs_arc.write().await;
+            docs.insert(uri_clone, text_clone);
+        } else {
+            eprintln!("LSP: did_open PANICKED storing document");
+            return;
+        }
         eprintln!("LSP: did_open document stored");
         
-        // Clear cache for this document
+        // Clear cache for this document - wrap in catch_unwind
         eprintln!("LSP: did_open clearing cache");
-        {
-            let mut cache = self.parsed_cache.write().await;
-            cache.remove(&uri);
+        let cache_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.parsed_cache.clone(), uri.clone())
+        }));
+        
+        if let Ok((cache_arc, uri_clone)) = cache_result {
+            let mut cache = cache_arc.write().await;
+            cache.remove(&uri_clone);
+            eprintln!("LSP: did_open cache cleared");
+        } else {
+            eprintln!("LSP: did_open PANICKED clearing cache (continuing anyway)");
         }
-        eprintln!("LSP: did_open cache cleared");
         
         // Call on_change after releasing lock
         eprintln!("LSP: did_open calling on_change");
@@ -122,16 +151,33 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let uri = params.text_document.uri.clone();
-        let text = params
-            .content_changes
-            .into_iter()
-            .next()
-            .map(|change| change.text)
-            .unwrap_or_default();
+        eprintln!("LSP: did_change START");
+        
+        // Wrap extraction in catch_unwind
+        let extract_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let uri = params.text_document.uri.clone();
+            let text = params
+                .content_changes
+                .into_iter()
+                .next()
+                .map(|change| change.text)
+                .unwrap_or_default();
+            (uri, text)
+        }));
+        
+        let (uri, text) = match extract_result {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("LSP: did_change PANICKED extracting params: {:?}", e);
+                return;
+            }
+        };
+        
+        eprintln!("LSP: did_change uri={}, text_len={}", uri, text.len());
         
         // Check document size
         if text.len() > self.max_document_size {
+            eprintln!("LSP: did_change document too large, skipping");
             let _ = self.client
                 .log_message(
                     MessageType::WARNING,
@@ -141,20 +187,39 @@ impl tower_lsp::LanguageServer for Backend {
             return;
         }
         
-        // Store document - release lock quickly
-        {
-            let mut docs = self.documents.write().await;
-            docs.insert(uri.clone(), text.clone());
-        } // Lock released here
+        // Store document - release lock quickly - wrap in catch_unwind
+        eprintln!("LSP: did_change storing document");
+        let store_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.documents.clone(), uri.clone(), text.clone())
+        }));
         
-        // Invalidate cache for this document
-        {
-            let mut cache = self.parsed_cache.write().await;
-            cache.remove(&uri);
+        if let Ok((docs_arc, uri_clone, text_clone)) = store_result {
+            let mut docs = docs_arc.write().await;
+            docs.insert(uri_clone, text_clone);
+            eprintln!("LSP: did_change document stored");
+        } else {
+            eprintln!("LSP: did_change PANICKED storing document");
+            return;
+        }
+        
+        // Invalidate cache for this document - wrap in catch_unwind
+        eprintln!("LSP: did_change clearing cache");
+        let cache_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.parsed_cache.clone(), uri.clone())
+        }));
+        
+        if let Ok((cache_arc, uri_clone)) = cache_result {
+            let mut cache = cache_arc.write().await;
+            cache.remove(&uri_clone);
+            eprintln!("LSP: did_change cache cleared");
+        } else {
+            eprintln!("LSP: did_change PANICKED clearing cache (continuing anyway)");
         }
         
         // Call on_change after releasing lock
+        eprintln!("LSP: did_change calling on_change");
         self.on_change(uri, text).await;
+        eprintln!("LSP: did_change END");
     }
 
     async fn completion(
