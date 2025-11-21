@@ -5,6 +5,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "pain-lsp"
+path = "src/main.rs"
+
 [dependencies]
 tower-lsp.workspace = true
 pain-compiler = { path = "../pain-compiler" }
