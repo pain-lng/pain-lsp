@@ -77,11 +77,14 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        eprintln!("LSP: did_open START");
         let uri = params.text_document.uri.clone();
         let text = params.text_document.text.clone();
+        eprintln!("LSP: did_open uri={}, text_len={}", uri, text.len());
         
         // Check document size to prevent memory issues
         if text.len() > self.max_document_size {
+            eprintln!("LSP: did_open document too large, skipping");
             let _ = self.client
                 .log_message(
                     MessageType::WARNING,
@@ -92,22 +95,25 @@ impl tower_lsp::LanguageServer for Backend {
         }
         
         // Store document - release lock quickly
+        eprintln!("LSP: did_open storing document");
         {
             let mut docs = self.documents.write().await;
             docs.insert(uri.clone(), text.clone());
         } // Lock released here
+        eprintln!("LSP: did_open document stored");
         
         // Clear cache for this document
+        eprintln!("LSP: did_open clearing cache");
         {
             let mut cache = self.parsed_cache.write().await;
             cache.remove(&uri);
         }
+        eprintln!("LSP: did_open cache cleared");
         
-        // Call on_change after releasing lock - use spawn to avoid blocking
-        // We need to create a temporary Backend-like structure to call check_document
-        // But since we can't clone Backend, we'll just call on_change directly
-        // The on_change method already has panic protection
+        // Call on_change after releasing lock
+        eprintln!("LSP: did_open calling on_change");
         self.on_change(uri, text).await;
+        eprintln!("LSP: did_open END");
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -525,20 +531,30 @@ impl Backend {
     }
 
     pub fn check_document(&self, text: &str) -> Vec<Diagnostic> {
+        eprintln!("LSP: check_document START text_len={}", text.len());
         // Wrap entire function in catch_unwind to prevent any panics
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.check_document_internal(text)
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            eprintln!("LSP: check_document calling check_document_internal");
+            let diags = self.check_document_internal(text);
+            eprintln!("LSP: check_document_internal returned {} diagnostics", diags.len());
+            diags
         })).unwrap_or_else(|_| {
+            eprintln!("LSP: check_document_internal panicked");
             // If anything panics, return empty diagnostics
             vec![]
-        })
+        });
+        eprintln!("LSP: check_document END");
+        result
     }
 
     fn check_document_internal(&self, text: &str) -> Vec<Diagnostic> {
+        eprintln!("LSP: check_document_internal START");
         let mut diagnostics = Vec::new();
 
         // Parse with error recovery for better IDE experience
+        eprintln!("LSP: check_document_internal calling parse_with_recovery");
         let (parse_result, parse_errors) = parse_with_recovery(text);
+        eprintln!("LSP: check_document_internal parse_with_recovery returned {} errors", parse_errors.len());
 
         // Add parse errors as diagnostics
         for parse_err in &parse_errors {
