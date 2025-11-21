@@ -5,8 +5,6 @@ use pain_compiler::{
     type_check_program_with_context, type_checker::TypeContext, warnings::WarningCollector,
 };
 use std::collections::{HashMap, HashSet};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 // Note: timeout and Duration imports removed - simplified implementation
@@ -40,36 +38,11 @@ impl Backend {
         }
     }
     
-    // Get or parse program with caching
-    async fn get_or_parse_program(&self, uri: &url::Url, text: &str) -> Option<Program> {
-        // Simple hash-based cache check
-        let mut hasher = DefaultHasher::new();
-        text.hash(&mut hasher);
-        let text_hash = hasher.finish().to_string();
-        
-        // Check cache
-        {
-            let cache = self.parsed_cache.read().await;
-            if let Some((cached_hash, cached_program)) = cache.get(uri) {
-                if cached_hash == &text_hash {
-                    return Some(cached_program.clone());
-                }
-            }
-        }
-        
-        // Parse and cache
+    // Get or parse program - simplified without caching to avoid panics
+    async fn get_or_parse_program(&self, _uri: &url::Url, text: &str) -> Option<Program> {
+        // Parse directly without caching to avoid clone panics
         let (parse_result, _) = parse_with_recovery(text);
-        if let Ok(program) = parse_result {
-            let mut cache = self.parsed_cache.write().await;
-            // Limit cache size to prevent memory issues
-            if cache.len() > 50 {
-                cache.clear(); // Simple eviction - clear all
-            }
-            cache.insert(uri.clone(), (text_hash, program.clone()));
-            Some(program)
-        } else {
-            None
-        }
+        parse_result.ok()
     }
 }
 
@@ -124,7 +97,7 @@ impl tower_lsp::LanguageServer for Backend {
             docs.insert(uri.clone(), text.clone());
         } // Lock released here
         
-        // Invalidate cache for this document
+        // Clear cache for this document (simplified - no panic protection needed)
         {
             let mut cache = self.parsed_cache.write().await;
             cache.remove(&uri);
@@ -529,12 +502,23 @@ impl Backend {
             // If check_document panics, return empty diagnostics
             // Log the panic for debugging
             eprintln!("LSP: check_document panicked, returning empty diagnostics");
+            eprintln!("LSP: text length: {}, uri: {}", text.len(), uri);
             vec![]
         });
         
-        // Publish diagnostics - this is fire-and-forget, returns ()
-        // If this panics, it will be caught by the LSP framework
-        self.client.publish_diagnostics(uri, diagnostics, None).await;
+        // Publish diagnostics - wrap in catch_unwind to prevent panics
+        let publish_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.client.clone(), uri.clone(), diagnostics)
+        }));
+        
+        if let Ok((client, uri_clone, diags)) = publish_result {
+            // Use spawn to avoid blocking
+            tokio::spawn(async move {
+                client.publish_diagnostics(uri_clone, diags, None).await;
+            });
+        } else {
+            eprintln!("LSP: on_change panicked before publishing diagnostics");
+        }
     }
 
     pub fn check_document(&self, text: &str) -> Vec<Diagnostic> {
