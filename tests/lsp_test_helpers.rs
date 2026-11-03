@@ -21,12 +21,7 @@ impl TestLspClient {
     pub async fn new() -> Self {
         // Create a mock client for testing
         // In real implementation, we'd use tower-lsp's test utilities
-        let (service, _) = LspService::new(|client| {
-            Backend {
-                client,
-                documents: Arc::new(RwLock::new(HashMap::new())),
-            }
-        });
+        let (service, _) = LspService::new(|client| Backend::new(client));
         
         // For now, we'll need to create Backend directly
         // This is a simplified version - full implementation would use proper test client

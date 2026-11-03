@@ -10,10 +10,7 @@ use tokio::sync::RwLock;
 fn create_test_backend() -> Backend {
     // Create a minimal backend - we'll use a dummy client since check_document doesn't need it
     // In a real implementation, we'd use tower-lsp's test framework
-    let (service, _socket) = tower_lsp::LspService::new(|client| Backend {
-        client,
-        documents: Arc::new(RwLock::new(HashMap::new())),
-    });
+    let (service, _socket) = tower_lsp::LspService::new(|client| Backend::new(client));
     
     // We can't easily extract the backend from the service
     // Instead, let's create a helper that directly tests check_document
