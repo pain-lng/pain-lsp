@@ -234,11 +234,6 @@ fn test_counter_class_example() {
 class Counter:
     let value: int
 
-    fn new(start: int) -> Counter:
-        let c = Counter()
-        c.value = start
-        return c
-
     fn increment():
         self.value = self.value + 1
 
@@ -246,15 +241,22 @@ class Counter:
         return self.value
 
 fn main() -> int:
-    let counter = Counter.new(0)
+    let counter = new Counter(0)
     counter.increment()
     counter.increment()
     return counter.get()
 "#;
 
-    let _diagnostics = check_example_diagnostics(code);
-    // May have errors due to class implementation - that's ok for now
-    // Just test it doesn't panic
+    let diagnostics = check_example_diagnostics(code);
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "Counter example should have no errors: {:?}",
+        errors
+    );
 }
 
 #[test]

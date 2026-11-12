@@ -236,21 +236,14 @@ fn main():
 }
 
 #[test]
-#[ignore = "uses `fn new` / `Point.new(...)`: the parser rejects `new` as a method name, constructor syntax is undecided (docs/stdlib.md says `new Point(...)`)"]
 fn test_classes() {
     let code = r#"
 class Point:
     let x: int
     let y: int
-    
-    fn new(x: int, y: int) -> Point:
-        let p = Point()
-        p.x = x
-        p.y = y
-        return p
 
 fn main():
-    let p = Point.new(10, 20)
+    let p = new Point(10, 20)
 "#;
 
     let diagnostics = check_document_direct(code);
