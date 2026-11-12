@@ -697,6 +697,9 @@ impl Backend {
             }
 
             // Type check - wrap in catch_unwind to prevent panics
+            // TypeError is large by design (carries types and spans); the closure only
+            // forwards the checker result
+            #[allow(clippy::result_large_err)]
             let type_check_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 type_check_program_with_context(&program, &mut ctx)
             }));
