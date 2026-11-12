@@ -37,7 +37,7 @@ impl Backend {
             parsed_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
-    
+
     // Get or parse program - simplified without caching to avoid panics
     async fn get_or_parse_program(&self, _uri: &url::Url, text: &str) -> Option<Program> {
         // Parse directly without caching to avoid clone panics
@@ -75,7 +75,8 @@ impl tower_lsp::LanguageServer for Backend {
     async fn initialized(&self, _: InitializedParams) {
         eprintln!("LSP: initialized START");
         // Log initialization - ignore errors to prevent crashes
-        let _ = self.client
+        let _ = self
+            .client
             .log_message(MessageType::INFO, "Pain LSP server initialized")
             .await;
         eprintln!("LSP: initialized END - server is ready");
@@ -83,12 +84,12 @@ impl tower_lsp::LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         eprintln!("LSP: did_open START");
-        
+
         // Wrap entire handler in catch_unwind to prevent any panics from crashing LSP
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             params.text_document.uri.clone()
         }));
-        
+
         let uri = match result {
             Ok(u) => u,
             Err(e) => {
@@ -96,22 +97,27 @@ impl tower_lsp::LanguageServer for Backend {
                 return;
             }
         };
-        
+
         let text = params.text_document.text.clone();
         eprintln!("LSP: did_open uri={}, text_len={}", uri, text.len());
-        
+
         // Check document size to prevent memory issues
         if text.len() > self.max_document_size {
             eprintln!("LSP: did_open document too large, skipping");
-            let _ = self.client
+            let _ = self
+                .client
                 .log_message(
                     MessageType::WARNING,
-                    format!("Document {} is too large ({} bytes), skipping", uri, text.len()),
+                    format!(
+                        "Document {} is too large ({} bytes), skipping",
+                        uri,
+                        text.len()
+                    ),
                 )
                 .await;
             return;
         }
-        
+
         // Store document - release lock quickly - wrap in catch_unwind
         eprintln!("LSP: did_open storing document");
         let store_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -120,7 +126,7 @@ impl tower_lsp::LanguageServer for Backend {
             let text_clone = text.clone();
             (docs_arc, uri_clone, text_clone)
         }));
-        
+
         if let Ok((docs_arc, uri_clone, text_clone)) = store_result {
             let mut docs = docs_arc.write().await;
             docs.insert(uri_clone, text_clone);
@@ -129,13 +135,13 @@ impl tower_lsp::LanguageServer for Backend {
             return;
         }
         eprintln!("LSP: did_open document stored");
-        
+
         // Clear cache for this document - wrap in catch_unwind
         eprintln!("LSP: did_open clearing cache");
         let cache_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (self.parsed_cache.clone(), uri.clone())
         }));
-        
+
         if let Ok((cache_arc, uri_clone)) = cache_result {
             let mut cache = cache_arc.write().await;
             cache.remove(&uri_clone);
@@ -143,7 +149,7 @@ impl tower_lsp::LanguageServer for Backend {
         } else {
             eprintln!("LSP: did_open PANICKED clearing cache (continuing anyway)");
         }
-        
+
         // Call on_change after releasing lock
         eprintln!("LSP: did_open calling on_change");
         self.on_change(uri, text).await;
@@ -152,7 +158,7 @@ impl tower_lsp::LanguageServer for Backend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         eprintln!("LSP: did_change START");
-        
+
         // Wrap extraction in catch_unwind
         let extract_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let uri = params.text_document.uri.clone();
@@ -164,7 +170,7 @@ impl tower_lsp::LanguageServer for Backend {
                 .unwrap_or_default();
             (uri, text)
         }));
-        
+
         let (uri, text) = match extract_result {
             Ok(data) => data,
             Err(e) => {
@@ -172,27 +178,32 @@ impl tower_lsp::LanguageServer for Backend {
                 return;
             }
         };
-        
+
         eprintln!("LSP: did_change uri={}, text_len={}", uri, text.len());
-        
+
         // Check document size
         if text.len() > self.max_document_size {
             eprintln!("LSP: did_change document too large, skipping");
-            let _ = self.client
+            let _ = self
+                .client
                 .log_message(
                     MessageType::WARNING,
-                    format!("Document {} is too large ({} bytes), skipping", uri, text.len()),
+                    format!(
+                        "Document {} is too large ({} bytes), skipping",
+                        uri,
+                        text.len()
+                    ),
                 )
                 .await;
             return;
         }
-        
+
         // Store document - release lock quickly - wrap in catch_unwind
         eprintln!("LSP: did_change storing document");
         let store_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (self.documents.clone(), uri.clone(), text.clone())
         }));
-        
+
         if let Ok((docs_arc, uri_clone, text_clone)) = store_result {
             let mut docs = docs_arc.write().await;
             docs.insert(uri_clone, text_clone);
@@ -201,13 +212,13 @@ impl tower_lsp::LanguageServer for Backend {
             eprintln!("LSP: did_change PANICKED storing document");
             return;
         }
-        
+
         // Invalidate cache for this document - wrap in catch_unwind
         eprintln!("LSP: did_change clearing cache");
         let cache_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (self.parsed_cache.clone(), uri.clone())
         }));
-        
+
         if let Ok((cache_arc, uri_clone)) = cache_result {
             let mut cache = cache_arc.write().await;
             cache.remove(&uri_clone);
@@ -215,7 +226,7 @@ impl tower_lsp::LanguageServer for Backend {
         } else {
             eprintln!("LSP: did_change PANICKED clearing cache (continuing anyway)");
         }
-        
+
         // Call on_change after releasing lock
         eprintln!("LSP: did_change calling on_change");
         self.on_change(uri, text).await;
@@ -234,7 +245,7 @@ impl tower_lsp::LanguageServer for Backend {
             let docs = self.documents.read().await;
             docs.get(&uri).cloned()
         }; // Lock released here
-        
+
         if let Some(text) = text {
             // Use cached parsing for better performance
             let program = self.get_or_parse_program(&uri, &text).await;
@@ -243,11 +254,12 @@ impl tower_lsp::LanguageServer for Backend {
                 // Note: Timeout protection is handled at the VS Code extension level
                 let items = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     self.get_completions(&program, &text, position)
-                })).unwrap_or_else(|_| {
+                }))
+                .unwrap_or_else(|_| {
                     // If get_completions panics, return basic completions
                     self.get_basic_completions()
                 });
-                
+
                 return Ok(Some(CompletionResponse::Array(items)));
             }
         }
@@ -259,7 +271,11 @@ impl tower_lsp::LanguageServer for Backend {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>, tower_lsp::jsonrpc::Error> {
-        let uri = params.text_document_position_params.text_document.uri.clone();
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
         let position = params.text_document_position_params.position;
 
         // Get document text from cache - clone quickly and release lock
@@ -267,7 +283,7 @@ impl tower_lsp::LanguageServer for Backend {
             let docs = self.documents.read().await;
             docs.get(&uri).cloned()
         }; // Lock released here
-        
+
         if let Some(text) = text {
             // Use parse_with_recovery instead of parse to avoid panics
             let (parse_result, _) = parse_with_recovery(&text);
@@ -330,7 +346,8 @@ impl Backend {
         // Wrap in catch_unwind to prevent panics
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.get_completions_internal(program, text, position)
-        })).unwrap_or_else(|_| {
+        }))
+        .unwrap_or_else(|_| {
             // If anything panics, return basic completions
             eprintln!("LSP: get_completions panicked, returning basic completions");
             self.get_basic_completions()
@@ -369,7 +386,7 @@ impl Backend {
         let mut function_names = HashSet::new();
         let max_detailed_items = 50; // Limit detailed formatting for performance
         let mut detailed_count = 0;
-        
+
         for item in &program.items {
             match item {
                 Item::Function(func) => {
@@ -379,11 +396,12 @@ impl Backend {
                         detailed_count += 1;
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             format_function_signature(func)
-                        })).unwrap_or_else(|_| format!("fn {}", func.name))
+                        }))
+                        .unwrap_or_else(|_| format!("fn {}", func.name))
                     } else {
                         format!("fn {}", func.name)
                     };
-                    
+
                     items.push(CompletionItem {
                         label: func.name.clone(),
                         kind: Some(CompletionItemKind::FUNCTION),
@@ -409,11 +427,12 @@ impl Backend {
                             detailed_count += 1;
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 format_function_signature(method)
-                            })).unwrap_or_else(|_| format!("fn {}", method.name))
+                            }))
+                            .unwrap_or_else(|_| format!("fn {}", method.name))
                         } else {
                             format!("fn {}", method.name)
                         };
-                        
+
                         items.push(CompletionItem {
                             label: format!("{}.{}", class.name, method.name),
                             kind: Some(CompletionItemKind::METHOD),
@@ -429,8 +448,9 @@ impl Backend {
         // Extract variables from current scope - wrap in catch_unwind
         let vars = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             extract_variables_in_scope(program, line + 1, column + 1)
-        })).unwrap_or(None);
-        
+        }))
+        .unwrap_or(None);
+
         if let Some(vars) = vars {
             for var_name in vars {
                 if !function_names.contains(&var_name) {
@@ -449,7 +469,7 @@ impl Backend {
         // This avoids expensive formatting for functions that won't be shown
         let stdlib_funcs = get_stdlib_functions();
         let max_stdlib_items = 100; // Limit stdlib completions to prevent UI lag
-        
+
         for stdlib_func in stdlib_funcs.iter().take(max_stdlib_items) {
             // Avoid duplicates
             if !function_names.contains(&stdlib_func.name) {
@@ -467,7 +487,8 @@ impl Backend {
                             params_str.join(", "),
                             format_type(&stdlib_func.return_type)
                         )
-                    })).unwrap_or_else(|_| format!("{}()", stdlib_func.name))
+                    }))
+                    .unwrap_or_else(|_| format!("{}()", stdlib_func.name))
                 } else {
                     // For large lists, use simple format to save time
                     format!("{}()", stdlib_func.name)
@@ -574,30 +595,33 @@ impl Backend {
 
     async fn on_change(&self, uri: url::Url, text: String) {
         eprintln!("LSP: on_change START uri={}, text_len={}", uri, text.len());
-        
+
         // Wrap check_document in catch_unwind to prevent panics from crashing LSP
         // Note: We compute diagnostics synchronously here, but the lock is already released
         // so this won't block other operations. For very large files, this could still be slow,
         // but it's better than blocking the document cache.
         eprintln!("LSP: on_change calling check_document");
-        let diagnostics = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.check_document(&text)
-        })).unwrap_or_else(|e| {
-            // If check_document panics, return empty diagnostics
-            // Log the panic for debugging
-            eprintln!("LSP: check_document PANICKED!");
-            eprintln!("LSP: panic info: {:?}", e);
-            eprintln!("LSP: text length: {}, uri: {}", text.len(), uri);
-            vec![]
-        });
-        eprintln!("LSP: on_change check_document returned {} diagnostics", diagnostics.len());
-        
+        let diagnostics =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.check_document(&text)))
+                .unwrap_or_else(|e| {
+                    // If check_document panics, return empty diagnostics
+                    // Log the panic for debugging
+                    eprintln!("LSP: check_document PANICKED!");
+                    eprintln!("LSP: panic info: {:?}", e);
+                    eprintln!("LSP: text length: {}, uri: {}", text.len(), uri);
+                    vec![]
+                });
+        eprintln!(
+            "LSP: on_change check_document returned {} diagnostics",
+            diagnostics.len()
+        );
+
         // Publish diagnostics - wrap in catch_unwind to prevent panics
         eprintln!("LSP: on_change preparing to publish diagnostics");
         let publish_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (self.client.clone(), uri.clone(), diagnostics)
         }));
-        
+
         if let Ok((client, uri_clone, diags)) = publish_result {
             eprintln!("LSP: on_change spawning publish task");
             // Use spawn to avoid blocking
@@ -618,9 +642,13 @@ impl Backend {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             eprintln!("LSP: check_document calling check_document_internal");
             let diags = self.check_document_internal(text);
-            eprintln!("LSP: check_document_internal returned {} diagnostics", diags.len());
+            eprintln!(
+                "LSP: check_document_internal returned {} diagnostics",
+                diags.len()
+            );
             diags
-        })).unwrap_or_else(|_| {
+        }))
+        .unwrap_or_else(|_| {
             eprintln!("LSP: check_document_internal panicked");
             // If anything panics, return empty diagnostics
             vec![]
@@ -631,19 +659,22 @@ impl Backend {
 
     fn check_document_internal(&self, text: &str) -> Vec<Diagnostic> {
         eprintln!("LSP: check_document_internal START text_len={}", text.len());
-        
+
         // Handle empty files gracefully
         if text.trim().is_empty() {
             eprintln!("LSP: check_document_internal file is empty, returning no diagnostics");
             return Vec::new();
         }
-        
+
         let mut diagnostics = Vec::new();
 
         // Parse with error recovery for better IDE experience
         eprintln!("LSP: check_document_internal calling parse_with_recovery");
         let (parse_result, parse_errors) = parse_with_recovery(text);
-        eprintln!("LSP: check_document_internal parse_with_recovery returned {} errors", parse_errors.len());
+        eprintln!(
+            "LSP: check_document_internal parse_with_recovery returned {} errors",
+            parse_errors.len()
+        );
 
         // Add parse errors as diagnostics
         for parse_err in &parse_errors {
@@ -673,10 +704,11 @@ impl Backend {
             match type_check_result {
                 Ok(Ok(_)) => {
                     // Collect warnings - wrap in catch_unwind
-                    let warnings_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        WarningCollector::collect_warnings(&program, &ctx)
-                    }));
-                    
+                    let warnings_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            WarningCollector::collect_warnings(&program, &ctx)
+                        }));
+
                     if let Ok(warnings) = warnings_result {
                         for warning in warnings {
                             diagnostics.push(self.warning_to_diagnostic(&warning, text));
@@ -688,8 +720,9 @@ impl Backend {
                     let error_msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let formatter = ErrorFormatter::new(text).with_context(&ctx);
                         formatter.format_error(&err)
-                    })).unwrap_or_else(|_| format!("Type error: {:?}", err));
-                    
+                    }))
+                    .unwrap_or_else(|_| format!("Type error: {:?}", err));
+
                     diagnostics.push(self.type_error_to_diagnostic(&err, &error_msg));
                 }
                 Err(_) => {
@@ -762,7 +795,11 @@ impl Backend {
         }
     }
 
-    pub fn warning_to_diagnostic(&self, warning: &pain_compiler::Warning, _text: &str) -> Diagnostic {
+    pub fn warning_to_diagnostic(
+        &self,
+        warning: &pain_compiler::Warning,
+        _text: &str,
+    ) -> Diagnostic {
         let (message, span) = match warning {
             pain_compiler::Warning::UnusedVariable { name, span } => {
                 (format!("unused variable `{}`", name), *span)
@@ -802,7 +839,11 @@ impl Backend {
 }
 
 // Find function at given line and column position
-pub fn find_function_at_position(program: &Program, line: usize, _column: usize) -> Option<HoverInfo> {
+pub fn find_function_at_position(
+    program: &Program,
+    line: usize,
+    _column: usize,
+) -> Option<HoverInfo> {
     for item in &program.items {
         let Item::Function(func) = item else { continue };
         // Simple heuristic: check if position is on function name line
@@ -826,7 +867,8 @@ pub fn format_function_signature(func: &Function) -> String {
     // Wrap in catch_unwind to prevent panics from format_type recursion
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         format_function_signature_internal(func)
-    })).unwrap_or_else(|_| {
+    }))
+    .unwrap_or_else(|_| {
         // Fallback to simple signature if formatting panics
         format!("fn {}()", func.name)
     })
@@ -892,8 +934,16 @@ fn format_type_with_depth(ty: &Type, depth: usize) -> String {
         Type::Dynamic => "dynamic".to_string(),
         Type::List(inner) => format!("list[{}]", format_type_with_depth(inner, depth + 1)),
         Type::Array(inner) => format!("array[{}]", format_type_with_depth(inner, depth + 1)),
-        Type::Map(k, v) => format!("map[{}, {}]", format_type_with_depth(k, depth + 1), format_type_with_depth(v, depth + 1)),
-        Type::Tensor(inner, dims) => format!("Tensor[{}, {:?}]", format_type_with_depth(inner, depth + 1), dims),
+        Type::Map(k, v) => format!(
+            "map[{}, {}]",
+            format_type_with_depth(k, depth + 1),
+            format_type_with_depth(v, depth + 1)
+        ),
+        Type::Tensor(inner, dims) => format!(
+            "Tensor[{}, {:?}]",
+            format_type_with_depth(inner, depth + 1),
+            dims
+        ),
         Type::Named(name) => name.clone(),
     }
 }
@@ -931,7 +981,10 @@ pub fn extract_variables_in_scope(
 }
 
 // Extract variable names from statements
-pub fn extract_variables_from_statements(statements: &[Statement], variables: &mut HashSet<String>) {
+pub fn extract_variables_from_statements(
+    statements: &[Statement],
+    variables: &mut HashSet<String>,
+) {
     for stmt in statements {
         match stmt {
             Statement::Let { name, .. } => {
