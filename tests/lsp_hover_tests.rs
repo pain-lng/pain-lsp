@@ -1,8 +1,7 @@
 // LSP hover tests - test hover tooltip accuracy
 
 use pain_compiler::parse_with_recovery;
-use pain_lsp::{find_function_at_position, format_function_signature};
-use tower_lsp::lsp_types::*;
+use pain_lsp::find_function_at_position;
 
 #[test]
 fn test_hover_function_signature() {
@@ -10,18 +9,30 @@ fn test_hover_function_signature() {
 fn add(a: int, b: int) -> int:
     return a + b
 "#;
-    
+
     let (parse_result, _) = parse_with_recovery(code);
     if let Ok(program) = parse_result {
         // Test hover on function name (line 2, character 3)
         let hover_info = find_function_at_position(&program, 2, 3);
         assert!(hover_info.is_some(), "Should find function at position");
-        
+
         if let Some(hover_info) = hover_info {
-            assert!(hover_info.signature.contains("fn add"), "Should contain function signature");
-            assert!(hover_info.signature.contains("a: int"), "Should contain first parameter");
-            assert!(hover_info.signature.contains("b: int"), "Should contain second parameter");
-            assert!(hover_info.signature.contains("-> int"), "Should contain return type");
+            assert!(
+                hover_info.signature.contains("fn add"),
+                "Should contain function signature"
+            );
+            assert!(
+                hover_info.signature.contains("a: int"),
+                "Should contain first parameter"
+            );
+            assert!(
+                hover_info.signature.contains("b: int"),
+                "Should contain second parameter"
+            );
+            assert!(
+                hover_info.signature.contains("-> int"),
+                "Should contain return type"
+            );
         }
     }
 }
@@ -40,16 +51,19 @@ fn test_hover_function_with_doc() {
 fn add(a: int, b: int) -> int:
     return a + b
 "#;
-    
+
     let (parse_result, _) = parse_with_recovery(code);
     if let Ok(program) = parse_result {
         let hover_info = find_function_at_position(&program, 7, 3);
         assert!(hover_info.is_some(), "Should find function with doc");
-        
+
         if let Some(hover_info) = hover_info {
             assert!(hover_info.doc.is_some(), "Should have doc comment");
             if let Some(doc) = hover_info.doc {
-                assert!(doc.contains("adds two numbers"), "Doc should contain description");
+                assert!(
+                    doc.contains("adds two numbers"),
+                    "Doc should contain description"
+                );
             }
         }
     }
@@ -61,14 +75,13 @@ fn test_hover_no_function_at_position() {
 fn main():
     let x = 10
 "#;
-    
+
     let (parse_result, _) = parse_with_recovery(code);
     if let Ok(program) = parse_result {
         // Test hover on variable (should not find function)
-        let hover_info = find_function_at_position(&program, 3, 8);
+        let _hover_info = find_function_at_position(&program, 3, 8);
         // May or may not find function - depends on implementation
         // Just test that it doesn't panic
-        assert!(true, "Should not panic when no function at position");
     }
 }
 
@@ -84,14 +97,14 @@ fn func2(x: int) -> int:
 fn func3(a: int, b: int, c: int) -> int:
     return a + b + c
 "#;
-    
+
     let (parse_result, _) = parse_with_recovery(code);
     if let Ok(program) = parse_result {
         // Test hover on each function
         let hover1 = find_function_at_position(&program, 2, 3);
         let hover2 = find_function_at_position(&program, 5, 3);
         let hover3 = find_function_at_position(&program, 8, 3);
-        
+
         if let Some(hover1) = hover1 {
             assert!(hover1.signature.contains("func1"), "Should find func1");
         }
@@ -112,14 +125,12 @@ fn outer():
         pass
     inner()
 "#;
-    
+
     let (parse_result, _) = parse_with_recovery(code);
     if let Ok(program) = parse_result {
         // Test that we can find functions even in nested contexts
-        let hover = find_function_at_position(&program, 2, 3);
+        let _hover = find_function_at_position(&program, 2, 3);
         // May or may not work depending on implementation
         // Just test it doesn't panic
-        assert!(true, "Should handle nested functions without panicking");
     }
 }
-

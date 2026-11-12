@@ -6,13 +6,13 @@ use tower_lsp::lsp_types::*;
 // Test helper to check diagnostics for example code
 fn check_example_diagnostics(code: &str) -> Vec<Diagnostic> {
     use pain_compiler::{
-        type_check_program_with_context, type_checker::TypeContext, warnings::WarningCollector,
-        error::ErrorFormatter,
+        error::ErrorFormatter, type_check_program_with_context, type_checker::TypeContext,
+        warnings::WarningCollector,
     };
-    
+
     let mut diagnostics = Vec::new();
     let (parse_result, parse_errors) = parse_with_recovery(code);
-    
+
     // Add parse errors
     for parse_err in &parse_errors {
         diagnostics.push(Diagnostic {
@@ -36,7 +36,7 @@ fn check_example_diagnostics(code: &str) -> Vec<Diagnostic> {
             data: None,
         });
     }
-    
+
     // Type check
     if let Ok(program) = parse_result {
         let mut ctx = TypeContext::new();
@@ -50,7 +50,7 @@ fn check_example_diagnostics(code: &str) -> Vec<Diagnostic> {
                 }
             }
         }
-        
+
         match type_check_program_with_context(&program, &mut ctx) {
             Ok(_) => {
                 let warnings = WarningCollector::collect_warnings(&program, &ctx);
@@ -69,7 +69,7 @@ fn check_example_diagnostics(code: &str) -> Vec<Diagnostic> {
                             ("unreachable code".to_string(), span)
                         }
                     };
-                    
+
                     diagnostics.push(Diagnostic {
                         range: Range {
                             start: Position {
@@ -101,7 +101,7 @@ fn check_example_diagnostics(code: &str) -> Vec<Diagnostic> {
                     pain_compiler::TypeError::CannotInferType { span, .. } => *span,
                     pain_compiler::TypeError::InvalidOperation { span, .. } => *span,
                 };
-                
+
                 diagnostics.push(Diagnostic {
                     range: Range {
                         start: Position {
@@ -125,7 +125,7 @@ fn check_example_diagnostics(code: &str) -> Vec<Diagnostic> {
             }
         }
     }
-    
+
     diagnostics
 }
 
@@ -140,7 +140,7 @@ fn fib(n: int) -> int:
 fn main() -> int:
     return fib(20)
 "#;
-    
+
     let diagnostics = check_example_diagnostics(code);
     let errors: Vec<_> = diagnostics
         .iter()
@@ -164,7 +164,7 @@ fn sum(n: int) -> int:
 fn main() -> int:
     return sum(10000)
 "#;
-    
+
     let diagnostics = check_example_diagnostics(code);
     let errors: Vec<_> = diagnostics
         .iter()
@@ -184,7 +184,7 @@ fn fact(n: int) -> int:
 fn main() -> int:
     return fact(15)
 "#;
-    
+
     let diagnostics = check_example_diagnostics(code);
     let errors: Vec<_> = diagnostics
         .iter()
@@ -215,13 +215,17 @@ fn fibonacci(n: int) -> int:
 fn main() -> int:
     return fibonacci(10)
 "#;
-    
+
     let diagnostics = check_example_diagnostics(code);
     let errors: Vec<_> = diagnostics
         .iter()
         .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
         .collect();
-    assert_eq!(errors.len(), 0, "Fibonacci iterative example should have no errors");
+    assert_eq!(
+        errors.len(),
+        0,
+        "Fibonacci iterative example should have no errors"
+    );
 }
 
 #[test]
@@ -247,15 +251,10 @@ fn main() -> int:
     counter.increment()
     return counter.get()
 "#;
-    
-    let diagnostics = check_example_diagnostics(code);
-    let errors: Vec<_> = diagnostics
-        .iter()
-        .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
-        .collect();
+
+    let _diagnostics = check_example_diagnostics(code);
     // May have errors due to class implementation - that's ok for now
     // Just test it doesn't panic
-    assert!(true, "Counter class example should not panic");
 }
 
 #[test]
@@ -272,7 +271,7 @@ fn main() -> int:
     
     return sum
 "#;
-    
+
     let diagnostics = check_example_diagnostics(code);
     let errors: Vec<_> = diagnostics
         .iter()
@@ -295,13 +294,17 @@ fn sum(n: int) -> int:
 fn main() -> int:
     return sum(10)
 "#;
-    
+
     let diagnostics = check_example_diagnostics(code);
     let errors: Vec<_> = diagnostics
         .iter()
         .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
         .collect();
-    assert_eq!(errors.len(), 0, "Full pipeline example should have no errors");
+    assert_eq!(
+        errors.len(),
+        0,
+        "Full pipeline example should have no errors"
+    );
 }
 
 #[test]
@@ -312,10 +315,9 @@ fn main():
     let app_name = config.app.name
     print("Starting " + app_name)
 "#;
-    
-    let diagnostics = check_example_diagnostics(code);
+
+    let _diagnostics = check_example_diagnostics(code);
     // PML functions may not be fully type-checked, but should not panic
-    assert!(true, "PML example should not panic");
 }
 
 #[test]
@@ -326,9 +328,7 @@ fn main():
     let doc = pml_parse(pml_source)
     print("Parsed PML successfully!")
 "#;
-    
-    let diagnostics = check_example_diagnostics(code);
-    // Should not panic
-    assert!(true, "PML parse example should not panic");
-}
 
+    let _diagnostics = check_example_diagnostics(code);
+    // Should not panic
+}

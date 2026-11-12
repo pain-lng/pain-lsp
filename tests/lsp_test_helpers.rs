@@ -1,10 +1,9 @@
 // LSP test helpers for comprehensive testing
+// Shared by other test crates, so not every helper is used in each of them
+#![allow(dead_code)]
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tower_lsp::lsp_types::*;
-use tower_lsp::{Client, LspService};
+use tower_lsp::LspService;
 use url::Url;
 
 // Import Backend from library
@@ -13,53 +12,40 @@ use pain_lsp::Backend;
 /// Test LSP client wrapper for testing
 /// This provides a simplified interface for testing LSP functionality
 pub struct TestLspClient {
-    backend: Arc<Backend>,
+    // The service is never driven; it only owns the Backend (see `backend()`)
+    service: LspService<Backend>,
 }
 
 impl TestLspClient {
-    /// Create a new test LSP client with a mock client
-    pub async fn new() -> Self {
-        // Create a mock client for testing
-        // In real implementation, we'd use tower-lsp's test utilities
-        let (service, _) = LspService::new(|client| Backend::new(client));
-        
-        // For now, we'll need to create Backend directly
-        // This is a simplified version - full implementation would use proper test client
-        todo!("Implement proper LSP test client setup with mock client")
+    /// Create a new test LSP client
+    pub fn new() -> Self {
+        let (service, _socket) = LspService::new(Backend::new);
+        Self { service }
+    }
+
+    fn backend(&self) -> &Backend {
+        self.service.inner()
     }
 
     /// Open a document in the LSP
     pub async fn open_document(&self, uri: Url, text: String) {
-        self.backend.documents.write().await.insert(uri, text);
+        self.backend().documents.write().await.insert(uri, text);
     }
 
     /// Change document content
     pub async fn change_document(&self, uri: Url, text: String) {
-        self.backend.documents.write().await.insert(uri, text);
+        self.backend().documents.write().await.insert(uri, text);
     }
 
     /// Get diagnostics for a document by checking it
-    pub async fn get_diagnostics(&self, uri: &Url, text: &str) -> Vec<Diagnostic> {
-        // Use Backend's check_document method
-        // Note: This requires making check_document public or creating a test method
-        self.backend.check_document(text)
+    pub fn get_diagnostics(&self, text: &str) -> Vec<Diagnostic> {
+        self.backend().check_document(text)
     }
+}
 
-    /// Request completion at position
-    pub async fn request_completion(
-        &self,
-        uri: Url,
-        position: Position,
-    ) -> Option<CompletionResponse> {
-        // Use Backend's completion method
-        // Note: This requires proper async handling
-        todo!("Implement completion request")
-    }
-
-    /// Request hover information at position
-    pub async fn request_hover(&self, uri: Url, position: Position) -> Option<Hover> {
-        // Use Backend's hover method
-        todo!("Implement hover request")
+impl Default for TestLspClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -78,3 +64,40 @@ pub fn range(start: Position, end: Position) -> Range {
     Range { start, end }
 }
 
+#[tokio::test]
+async fn test_client_tracks_documents_and_reports_diagnostics() {
+    let client = TestLspClient::new();
+    let uri = test_uri("main.pain");
+    client
+        .open_document(
+            uri.clone(),
+            "fn main():
+    let x = 1
+"
+            .to_string(),
+        )
+        .await;
+    client
+        .change_document(
+            uri.clone(),
+            "fn main(:
+"
+            .to_string(),
+        )
+        .await;
+    let text = client
+        .backend()
+        .documents
+        .read()
+        .await
+        .get(&uri)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        text,
+        "fn main(:
+"
+    );
+    assert!(!client.get_diagnostics(&text).is_empty());
+    let _ = range(position(0, 0), position(0, 1));
+}
