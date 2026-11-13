@@ -72,6 +72,7 @@ fn test_format_function_signature_simple() {
     use pain_compiler::span::{Position, Span};
 
     let func = Function {
+        public: false,
         name: "test".to_string(),
         params: vec![],
         return_type: None,
@@ -94,6 +95,7 @@ fn test_format_function_signature_with_params() {
     use pain_compiler::span::{Position, Span};
 
     let func = Function {
+        public: false,
         name: "add".to_string(),
         params: vec![
             Parameter {

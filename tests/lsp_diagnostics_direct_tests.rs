@@ -352,3 +352,39 @@ fn main() -> int:
         .collect();
     assert_eq!(errors.len(), 0, "Sum example should have no errors");
 }
+
+#[test]
+fn test_imports_are_resolved_from_the_document_path() {
+    let dir = std::env::temp_dir().join(format!("pain_lsp_imports_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("combat.pain"),
+        "pub class Unit:\n    let hp: int\n\npub fn strike(u: Unit, seed: int) -> int:\n    return u.hp + seed\n\nfn hidden() -> int:\n    return 1\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pain");
+    let (service, _socket) = tower_lsp::LspService::new(pain_lsp::lsp::Backend::new);
+    let backend = service.inner();
+
+    // Imported class and function: no diagnostics
+    let ok =
+        "import combat: strike, Unit\n\nfn main() -> int:\n    return strike(new Unit(5), 2)\n";
+    assert!(backend.check_document_at(ok, Some(&main)).is_empty());
+
+    // A private name is reported on the import line
+    let private = "import combat: strike, hidden\n\nfn main() -> int:\n    return hidden()\n";
+    let diags = backend.check_document_at(private, Some(&main));
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].range.start.line, 0);
+    assert!(diags[0].message.contains("is not `pub`"));
+
+    // A missing module is reported on its own import line
+    let missing =
+        "import combat: strike\nimport nowhere: thing\n\nfn main() -> int:\n    return 0\n";
+    let diags = backend.check_document_at(missing, Some(&main));
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].range.start.line, 1);
+    assert!(diags[0].message.contains("module `nowhere` not found"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

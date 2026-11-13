@@ -601,16 +601,18 @@ impl Backend {
         // so this won't block other operations. For very large files, this could still be slow,
         // but it's better than blocking the document cache.
         eprintln!("LSP: on_change calling check_document");
-        let diagnostics =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.check_document(&text)))
-                .unwrap_or_else(|e| {
-                    // If check_document panics, return empty diagnostics
-                    // Log the panic for debugging
-                    eprintln!("LSP: check_document PANICKED!");
-                    eprintln!("LSP: panic info: {:?}", e);
-                    eprintln!("LSP: text length: {}, uri: {}", text.len(), uri);
-                    vec![]
-                });
+        let diagnostics = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let path = uri.to_file_path().ok();
+            self.check_document_at(&text, path.as_deref())
+        }))
+        .unwrap_or_else(|e| {
+            // If check_document panics, return empty diagnostics
+            // Log the panic for debugging
+            eprintln!("LSP: check_document PANICKED!");
+            eprintln!("LSP: panic info: {:?}", e);
+            eprintln!("LSP: text length: {}, uri: {}", text.len(), uri);
+            vec![]
+        });
         eprintln!(
             "LSP: on_change check_document returned {} diagnostics",
             diagnostics.len()
@@ -637,11 +639,16 @@ impl Backend {
     }
 
     pub fn check_document(&self, text: &str) -> Vec<Diagnostic> {
+        self.check_document_at(text, None)
+    }
+
+    /// Check a document; `path` is where it lives on disk, needed to resolve its imports
+    pub fn check_document_at(&self, text: &str, path: Option<&std::path::Path>) -> Vec<Diagnostic> {
         eprintln!("LSP: check_document START text_len={}", text.len());
         // Wrap entire function in catch_unwind to prevent any panics
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             eprintln!("LSP: check_document calling check_document_internal");
-            let diags = self.check_document_internal(text);
+            let diags = self.check_document_internal(text, path);
             eprintln!(
                 "LSP: check_document_internal returned {} diagnostics",
                 diags.len()
@@ -657,7 +664,59 @@ impl Backend {
         result
     }
 
-    fn check_document_internal(&self, text: &str) -> Vec<Diagnostic> {
+    /// Link a document that has imports with the modules it imports. The bodies of
+    /// the other modules are dropped, so type errors come from this document only.
+    fn link_document(
+        &self,
+        text: &str,
+        path: &std::path::Path,
+    ) -> Result<Program, pain_compiler::ModuleError> {
+        let root = pain_compiler::project_root(path);
+        let graph = pain_compiler::ModuleGraph::load_in(&root, path, &|file| {
+            if file == path {
+                Ok(text.to_string()) // the editor buffer, not the saved file
+            } else {
+                std::fs::read_to_string(file)
+            }
+        })?;
+        graph.link_isolated(0)
+    }
+
+    fn module_error_to_diagnostic(
+        &self,
+        err: &pain_compiler::ModuleError,
+        path: &std::path::Path,
+    ) -> Diagnostic {
+        // Errors found in another file are shown on the first line of this one
+        let (line, message) = if err.file == path {
+            (err.line.saturating_sub(1) as u32, err.message.clone())
+        } else {
+            (0, err.to_string())
+        };
+        Diagnostic {
+            range: Range {
+                start: Position { line, character: 0 },
+                end: Position {
+                    line,
+                    character: u32::MAX,
+                },
+            },
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("pain".to_string()),
+            message,
+            related_information: None,
+            tags: None,
+            data: None,
+        }
+    }
+
+    fn check_document_internal(
+        &self,
+        text: &str,
+        path: Option<&std::path::Path>,
+    ) -> Vec<Diagnostic> {
         eprintln!("LSP: check_document_internal START text_len={}", text.len());
 
         // Handle empty files gracefully
@@ -683,6 +742,22 @@ impl Backend {
 
         // If parsing succeeded (even partially), try type checking
         if let Ok(program) = parse_result {
+            let has_imports = !program.imports.is_empty();
+            let program = if has_imports {
+                // Imported names are only known after the modules are linked
+                let Some(path) = path else {
+                    return diagnostics; // unsaved buffer: imports cannot be resolved
+                };
+                match self.link_document(text, path) {
+                    Ok(linked) => linked,
+                    Err(err) => {
+                        diagnostics.push(self.module_error_to_diagnostic(&err, path));
+                        return diagnostics;
+                    }
+                }
+            } else {
+                program
+            };
             // Build type context for better error messages
             let mut ctx = TypeContext::new();
             for item in &program.items {
@@ -705,6 +780,9 @@ impl Backend {
             }));
 
             match type_check_result {
+                // Warnings are computed per file; in a linked program they would
+                // point into the imported modules
+                Ok(Ok(_)) if has_imports => {}
                 Ok(Ok(_)) => {
                     // Collect warnings - wrap in catch_unwind
                     let warnings_result =
